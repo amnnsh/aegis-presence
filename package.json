@@ -1,0 +1,35 @@
+{
+  "name": "aegis-presence-prototype",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.16.0"
+  },
+  "scripts": {
+    "postinstall": "node scripts/prepare-assets.mjs",
+    "assets": "node scripts/prepare-assets.mjs --required",
+    "dev": "node scripts/next.mjs dev",
+    "build": "npm run assets && node scripts/next.mjs build",
+    "start": "node scripts/serve.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test tests/risk.test.ts tests/challenges.test.ts tests/injection.test.ts tests/reflection.test.ts",
+    "check": "npm run typecheck && npm test && npm run build",
+    "test:browser": "playwright test"
+  },
+  "dependencies": {
+    "@mediapipe/tasks-vision": "0.10.35",
+    "next": "16.3.8",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.57.0",
+    "@tailwindcss/postcss": "^4.1.0",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "tailwindcss": "^4.1.0",
+    "typescript": "~5.9.3"
+  }
+}

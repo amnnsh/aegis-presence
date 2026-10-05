@@ -1,0 +1,21 @@
+node_modules/
+.next/
+out/
+.vercel/
+coverage/
+playwright-report/
+test-results/
+*.tsbuildinfo
+*.log
+.env
+.env.*
+!.env.example
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.qa/
+# Generated locally from a pinned package and a versioned public model.
+public/mediapipe/wasm/
+public/models/*.task
+public/models/*.partial

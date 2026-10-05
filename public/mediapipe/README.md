@@ -1,0 +1,1 @@
+The `wasm/` directory is copied from the pinned `@mediapipe/tasks-vision` package by `scripts/prepare-assets.mjs`. It is generated and git-ignored. Runtime WASM/model loads are same-origin. Keep the WASM files and JavaScript package on the same version.

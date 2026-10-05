@@ -1,0 +1,33 @@
+name: Frontend checks
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            echo "Commit package-lock.json after your first successful npm install."
+            npm install
+          fi
+      - name: Type-check, unit-test, and build
+        run: npm run check
+      - name: Install browser test runtime
+        run: npx playwright install --with-deps chromium
+      - name: Check static export in desktop and mobile Chromium
+        run: npm run test:browser

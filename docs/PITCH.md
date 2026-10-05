@@ -1,0 +1,18 @@
+# Aegis
+## Trust the person. Not just the pixels.
+
+**Problem.** A realistic face on a screen is no longer reliable evidence of a live person. Entrust reported a 40% year-over-year increase in digital injection attacks. Pindrop's September 2026 survey found that 74% of surveyed US enterprise security leaders had encountered or suspected a deepfake attack in the previous year. Gartner predicted in 2024 that, by 2026, 30% of enterprises would consider identity-verification and authentication solutions unreliable in isolation. These are differently scoped external findings, not measurements of Aegis. [1-3]
+
+**Solution.** Aegis is a proposed layered presence-verification service with an explainable decision: approve, step-up, or reject. This browser-only prototype combines camera metadata, randomized head/blink prompts, a partial mouth-motion challenge, and an optional screen-light response. It makes every signal's origin visible and treats missing evidence as uncertainty. Deepfake-artifact and audio-visual model outputs are clearly simulated, as are the attack examples and administrator history. No biometric upload, microphone capture, recording, or persistent session storage is implemented.
+
+**Why layers can beat a standalone check.** A face match asks whether an image resembles someone; it does not by itself establish who supplied the stream or whether a live person followed a fresh challenge. Complementary checks can address different failure modes and support targeted step-up instead of a brittle yes/no answer. But adding scores does not automatically create independent evidence: Aegis's camera-derived checks share a source and remain spoofable. The full product must validate incremental benefit against adaptive attacks, across devices and user groups, rather than multiply unproven confidence claims.
+
+**First target users.** The initial customer hypothesis is security and fraud teams responsible for high-risk account recovery, fintech onboarding, and enterprise help-desk impersonation. Aegis would complement their identity stack, not replace document verification, credential authentication, or human review. Early pilots would focus on one workflow with a clear escalation path and consenting participants.
+
+**Business model.** A business-to-business subscription with a platform fee and usage-based verification pricing, followed by enterprise SDK, workflow, and support tiers. This is a proposed model, not existing revenue, contracted customers, or validated willingness to pay. Pilot success would be measured through false accept/reject tradeoffs, accessible completion, reviewer workload, latency, and validated attack resistance, not a headline accuracy number.
+
+**What the hackathon proves.** An end-to-end interaction, local landmark-based heuristics, explicit simulation boundaries, deterministic fixture decisions, and an inspectable risk policy. Live sessions deliberately cannot approve because key evidence is missing. The next build adds server-owned sessions and policy, a license-reviewed real model, stronger and more accessible liveness, and a documented API/SDK. The browser alone cannot become a trusted authorization boundary.
+
+**The ask.** A design partner with one recovery or onboarding workflow, consenting test participants, and a security reviewer to help define a credible evaluation. Aegis aims to make uncertainty visible before granting trust.
+
+**Sources:** [1] Entrust, 2026 Identity Fraud Report announcement, Nov. 18, 2025. [2] Pindrop enterprise deepfake survey announcement, Sept. 28, 2026, 250 US security leaders. [3] Gartner forecast, Feb. 1, 2024. Full source links and scope notes are in the README.
