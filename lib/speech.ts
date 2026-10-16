@@ -23,6 +23,7 @@ class SpeechModel {
     try {
       this.worker = new Worker(new URL("./asr.worker.ts", import.meta.url), { type: "module" });
       this.worker.onmessage = (event: MessageEvent<AsrResponse>) => {
+        if (event.data.type === "booted") { this.worker?.postMessage({ type: "load" }); return; }
         if (event.data.type === "progress") { this.percent = event.data.percent; return; }
         if (event.data.type === "error") this.error = "The on-device speech model or its runtime failed.";
         const done = this.waiting; this.waiting = null; done?.(event.data);
@@ -40,7 +41,9 @@ class SpeechModel {
     return new Promise(resolve => {
       const timer = setTimeout(() => { this.error = request.type === "load" ? "The speech model took too long to load." : "Speech recognition took too long to answer."; this.waiting = null; resolve(null); }, timeoutMs);
       this.waiting = message => { clearTimeout(timer); resolve(message); };
-      worker.postMessage(request);
+      // A bundled worker can still be initializing its imports when constructed.
+      // Its booted message triggers load; later requests have a live listener.
+      if (request.type !== "load") worker.postMessage(request);
     });
   }
   async transcribe(pcm: Float32Array): Promise<string | null> {

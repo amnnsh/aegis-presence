@@ -7,6 +7,7 @@ import { env, pipeline } from "@huggingface/transformers";
 
 export type AsrRequest = { type: "load" } | { type: "transcribe"; pcm: Float32Array };
 export type AsrResponse =
+  | { type: "booted" }
   | { type: "progress"; percent: number }
   | { type: "ready" }
   | { type: "result"; text: string }
@@ -54,3 +55,8 @@ self.onmessage = async (event: MessageEvent<AsrRequest>) => {
     send({ type: "error", message: error instanceof Error ? error.message : "Speech model failed." });
   }
 };
+
+// The bundled dependencies may initialize asynchronously. Tell the page when
+// the listener actually exists, so its initial load request cannot be lost.
+send({ type: "booted" });
+

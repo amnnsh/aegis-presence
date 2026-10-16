@@ -20,6 +20,8 @@ function productionWorkerUrl() {
 
 test("quiet speech passes through microphone capture and the real speech worker", async ({ page }) => {
   test.setTimeout(120_000);
+  page.on("pageerror", error => console.error("Speech test page error:", error.message));
+  page.on("console", message => { if (message.type() === "error") console.error("Speech test browser error:", message.text()); });
   const workerUrl = productionWorkerUrl();
   await page.route("**/__speech-test__/lib/*.ts", async route => {
     const file = new URL(route.request().url()).pathname.split("/").pop()!;
@@ -31,13 +33,14 @@ test("quiet speech passes through microphone capture and the real speech worker"
   });
   await page.route("**/__speech-test__/digits.wav", route => route.fulfill({ contentType: "audio/wav", body: readFileSync(resolve("tests/fixtures/one-two-three-four.wav")) }));
   await page.goto("/verify/");
+  await page.getByRole("heading", { level: 1 }).click(); // real user activation for Web Audio
   const outcome = await page.evaluate(async () => {
     // Dynamic paths keep these test-only modules out of the application bundle.
     const base = "/__speech-test__/lib/";
     const { AudioCapture } = await import(base + "audio.ts");
     const { DigitsCheck } = await import(base + "speech.ts");
     const context = new AudioContext({ sampleRate: 16000 });
-    await context.resume();
+    await Promise.race([context.resume(), new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Test audio context did not resume")), 5000))]);
     const buffer = await context.decodeAudioData(await (await fetch("/__speech-test__/digits.wav")).arrayBuffer());
     const samples = buffer.getChannelData(0);
     let peak = 0;

@@ -8,7 +8,10 @@ test("intelligible input still reaches ASR when lip-sync's noise threshold rejec
   let transcribed = false;
   class WorkerMock {
     onmessage: ((event: { data: unknown }) => void) | null = null;
+    listening = false;
+    constructor() { queueMicrotask(() => { this.listening = true; this.onmessage?.({ data: { type: "booted" } }); }); }
     postMessage(request: { type: string }) {
+      assert.equal(this.listening, true, "Do not post before the worker registers its listener");
       if (request.type === "transcribe") transcribed = true;
       queueMicrotask(() => this.onmessage?.({ data: request.type === "load" ? { type: "ready" } : { type: "result", text: "one two three four" } }));
     }
@@ -32,7 +35,10 @@ test("digital silence never reaches ASR even without mouth samples", async () =>
   let transcribed = false;
   class WorkerMock {
     onmessage: ((event: { data: unknown }) => void) | null = null;
+    listening = false;
+    constructor() { queueMicrotask(() => { this.listening = true; this.onmessage?.({ data: { type: "booted" } }); }); }
     postMessage(request: { type: string }) {
+      assert.equal(this.listening, true, "Do not post before the worker registers its listener");
       if (request.type === "transcribe") transcribed = true;
       queueMicrotask(() => this.onmessage?.({ data: { type: "ready" } }));
     }
