@@ -1,4 +1,4 @@
-export type SignalId = "injection" | "liveness" | "reflection" | "artifacts" | "sync";
+export type SignalId = "injection" | "liveness" | "reflection" | "pulse" | "sync";
 export type Provenance = "observed" | "heuristic" | "server" | "simulated" | "unavailable";
 export type Decision = "approve" | "step-up" | "reject";
 export type ScenarioId = "normal" | "replay" | "virtual" | "deepfake";

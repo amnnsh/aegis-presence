@@ -10,8 +10,13 @@ import statistics
 
 from .policy import FRESHNESS
 
-EVENT_TYPES = ("challenge_start", "cue", "response", "challenge_end")
-
+EVENT_TYPES = (
+    "challenge_start",
+    "cue",
+    "response",
+    "challenge_end",
+    "pulse_result",
+)
 LATENCY_MIN_MS = 150
 LATENCY_MAX_MS = 2500
 ANTICIPATORY_MS = 120

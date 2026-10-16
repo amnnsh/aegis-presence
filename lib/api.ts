@@ -17,7 +17,12 @@ export type PlanChallenge =
   | { id: string; kind: "digits"; digits: string };
 export interface Plan { challenges: PlanChallenge[]; pulse_hold_ms: number }
 export interface SessionStart { session_id: string; expires_at: string; server_now_ms: number; plan: Plan }
-export type EventType = "challenge_start" | "cue" | "response" | "challenge_end";
+export type EventType =
+  | "challenge_start"
+  | "cue"
+  | "response"
+  | "challenge_end"
+  | "pulse_result";
 export interface ClientEvent { challenge_id: string; type: EventType; client_ts_ms: number; payload: Record<string, number | string | boolean | null> }
 export interface ServerSignal { id: string; risk: number | null; provenance: Signal["provenance"]; detail: string }
 export interface CompleteResponse {
