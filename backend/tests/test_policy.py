@@ -3,7 +3,7 @@ import pytest
 
 from app.policy import SIGNAL_IDS, SIGNALS, apply_freshness, evaluate_risk
 
-# Scores are in SIGNAL_IDS order: injection, liveness, reflection, artifacts, sync.
+# Scores are in SIGNAL_IDS order: injection, liveness, reflection, pulse, sync.
 ATTACK_LAB = [
     ("normal", [8, 5, 9, 7, 5], 7, "approve"),
     ("replay", [35, 94, 88, 62, 82], 73, "reject"),

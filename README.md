@@ -28,7 +28,7 @@ A convincing face on a screen is not proof that a real person is present. Replay
 | 📷 Camera integrity | Reads browser-exposed camera metadata and frame cadence | Spoofable signals; not hardware attestation |
 | 👁️ Active liveness | Random head turn, two blinks, and a four-digit prompt. With the optional microphone, an on-device speech model (Whisper tiny) checks the spoken digits | Checks the words, not the speaker. Without the microphone it is mouth motion only. Does not certify liveness |
 | 🌈 Screen-light response | Optional six-step color stimulus and cheek-color sampling | Experimental; affected by lighting, exposure, and movement |
-| 🧩 Deepfake artifacts | Explains how a forensic signal would affect risk | **Simulated**; no forensic model runs |
+| 💓 Pulse signal (rPPG) | Experimental on-device skin-color pulse estimate | Unvalidated; not proof of liveness or medical heart rate |
 | 🔊 Audio-visual sync | With the optional microphone, correlates mouth opening with loudness during the digits prompt, on-device | Untuned correlation heuristic, **not** a lip-sync model. Unavailable (never simulated) without the microphone |
 | ⚖️ Explainable risk | Weighted local score, provenance, missing-evidence handling | Illustrative policy, **not** a fraud probability |
 | 🧪 Attack lab | Four fixed scenarios demonstrating approve / step-up / reject | Fictional fixtures, **not** measured detection results |
@@ -74,7 +74,7 @@ Aegis combines five inputs using fixed weights:
 | --- | ---: |
 | Active liveness | 30% |
 | Camera integrity | 20% |
-| Deepfake artifacts | 20% |
+| Pulse signal (rPPG) | 20% |
 | Screen-light response | 15% |
 | Audio-visual synchronization | 15% |
 
@@ -221,3 +221,7 @@ Built as a hackathon prototype. See the repository's commit history for contribu
 [Back to top](#️-aegis-presence)
 
 </div>
+
+### Experimental pulse stage
+
+After gestures, the browser offers a 12-second on-device rPPG stage with a skip option, a waveform and an estimated BPM. The estimate comes from forehead and cheek RGB means; raw frames are not retained. Signal quality and risk thresholds are exploratory and **not** evidence of genuine presence or medical pulse accuracy. Team validation with real cameras and replay attacks is pending.
