@@ -32,3 +32,53 @@ try {
   // Allow installation and the explicitly simulated attack lab; production builds require the assets.
   if (required) process.exitCode = 1;
 }
+
+// --- Spoken-digit check: on-device speech model (Whisper tiny, English, 8-bit) and the ONNX runtime. ---
+// Self-hosted so the browser never contacts a model hub and CSP connect-src 'self' keeps holding.
+// Pinned to one Hugging Face revision; the two weight files are checked against the SHA-256 the hub publishes for them.
+// Set AEGIS_SKIP_SPEECH_MODEL=1 to skip: the app then falls back to mouth-motion-only digits, clearly labeled.
+const speechRepo = "onnx-community/whisper-tiny.en";
+const speechRevision = "2575352d61be1bf7225cf8f8b268a4678025fc58";
+const speechFiles = [
+  { path: "config.json", size: 2197 },
+  { path: "generation_config.json", size: 1646 },
+  { path: "preprocessor_config.json", size: 339 },
+  { path: "tokenizer.json", size: 2405679 },
+  { path: "tokenizer_config.json", size: 282662 },
+  { path: "onnx/encoder_model_quantized.onnx", size: 10124993, sha256: "e93ec822f16a8fd264e7de972ad17d615ea7334b75a52d54c50c2e18dd503a25" },
+  { path: "onnx/decoder_model_merged_quantized.onnx", size: 30718858, sha256: "c0592d0749413c960569e1c7fb806b060d5d18f3ebad4a95cbf9a77dc6e9be52" },
+];
+if (process.env.AEGIS_SKIP_SPEECH_MODEL === "1") {
+  console.log("Speech model skipped (AEGIS_SKIP_SPEECH_MODEL=1). Spoken digits will be mouth-motion only.");
+} else {
+  try {
+    const require = createRequire(import.meta.url);
+    // The package only exports its entry point; walk up from it to the package root.
+    let packageRoot = dirname(require.resolve("@huggingface/transformers"));
+    while (!existsSync(resolve(packageRoot, "package.json"))) packageRoot = dirname(packageRoot);
+    mkdirSync(resolve(root, "public/ort"), { recursive: true });
+    for (const name of ["ort-wasm-simd-threaded.jsep.mjs", "ort-wasm-simd-threaded.jsep.wasm"]) {
+      const source = resolve(packageRoot, "dist", name);
+      if (!existsSync(source)) throw new Error(`ONNX runtime file ${name} not found in the installed Transformers.js package.`);
+      cpSync(source, resolve(root, "public/ort", name));
+    }
+    const ok = (file, target) => existsSync(target) && statSync(target).size === file.size
+      && (!file.sha256 || createHash("sha256").update(readFileSync(target)).digest("hex") === file.sha256);
+    for (const file of speechFiles) {
+      const target = resolve(root, "public/models/whisper", file.path);
+      if (ok(file, target)) continue;
+      console.log(`Downloading speech model file ${file.path} (build time only; no audio is involved)...`);
+      mkdirSync(dirname(target), { recursive: true });
+      const response = await fetch(`https://huggingface.co/${speechRepo}/resolve/${speechRevision}/${file.path}`, { signal: AbortSignal.timeout(300000) });
+      if (!response.ok) throw new Error(`Speech model download returned HTTP ${response.status} for ${file.path}.`);
+      writeFileSync(target + ".partial", Buffer.from(await response.arrayBuffer()));
+      if (!ok(file, target + ".partial")) throw new Error(`Unexpected length or checksum for ${file.path}; refusing to use it.`);
+      renameSync(target + ".partial", target);
+    }
+    console.log(`Speech model ready: ${speechRepo}@${speechRevision.slice(0, 12)} in public/models/whisper, runtime in public/ort.`);
+  } catch (error) {
+    console.error(`Speech asset setup: ${error.message}`);
+    console.error("Retry with npm run assets, or set AEGIS_SKIP_SPEECH_MODEL=1 to build without on-device digit recognition.");
+    if (required) process.exitCode = 1;
+  }
+}

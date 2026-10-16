@@ -4,8 +4,8 @@ export const SIGNALS: { id: SignalId; title: string; weight: number; short: stri
   { id: "injection", title: "Camera integrity", weight: 20, short: "Device metadata" },
   { id: "liveness", title: "Active liveness", weight: 30, short: "Random gestures" },
   { id: "reflection", title: "Light response", weight: 15, short: "Screen / face response" },
-  { id: "artifacts", title: "Deepfake artifacts", weight: 20, short: "Model placeholder" },
-  { id: "sync", title: "Audio-visual sync", weight: 15, short: "Model placeholder" },
+  { id: "pulse", title: "Pulse signal (rPPG)", weight: 20, short: "Skin-color pulse" },
+  { id: "sync", title: "Audio-visual sync", weight: 15, short: "Lip / voice timing" },
 ];
 export const POLICY = { stepUp: 30, reject: 65, unknownRisk: 60, injectionVeto: 70 } as const;
 
@@ -29,7 +29,7 @@ export function evaluateRisk(input: Signal[], mode: "live" | "simulation"): Deci
   const contributions = SIGNALS.map(({ id, weight }) => {
     const s = signals.find(item => item.id === id)!;
     const usable = finiteRisk(s.risk) && s.provenance !== "unavailable" &&
-      (mode === "simulation" || s.provenance === "observed" || s.provenance === "heuristic");
+      (mode === "simulation" || s.provenance === "observed" || s.provenance === "heuristic" || s.provenance === "server");
     return { id, weight, usedRisk: usable ? s.risk! : POLICY.unknownRisk, substituted: !usable };
   });
   const rawRisk = contributions.reduce((sum, item) => sum + item.usedRisk * item.weight / 100, 0);
@@ -50,7 +50,7 @@ export function evaluateRisk(input: Signal[], mode: "live" | "simulation"): Deci
   if (mode === "live") {
     // Conservative demo guard: a failed gesture, low light, or a missing model is NOT proof of fraud.
     decision = rawRisk >= POLICY.reject && flagged.length >= 2 && coverage >= 50 ? "reject" : "step-up";
-    reasons.push("Live sessions cannot approve: digit recognition, deepfake detection, and audio-visual synchronization are not implemented.");
+    reasons.push("Live sessions cannot approve: rPPG is experimental, and the spoken-digit and lip / voice timing checks are unvalidated heuristics.");
     reasons.push("Scores are uncalibrated browser heuristics. This is not identity verification or an access-control decision.");
   } else {
     reasons.push("Every input in this attack-lab session is a deterministic, simulated fixture. No attack was executed or detected.");

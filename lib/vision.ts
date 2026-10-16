@@ -1,3 +1,4 @@
+import type { RGBSample } from "./rppg.ts";
 import type { DeviceEvidence, FaceMetrics, Point } from "./types.ts";
 
 type Detector = {
@@ -22,7 +23,7 @@ export function cameraError(error: unknown): string {
   return error instanceof Error ? error.message : "Camera could not start. Use HTTPS or localhost and open the site directly, not inside a preview frame.";
 }
 
-/** Owns every hardware/model resource. No persistence, uploads, audio, or recording APIs. */
+/** Owns every camera/model resource. No persistence, uploads, or recording APIs. The microphone lives in lib/audio.ts. */
 export class BrowserVision {
   private callbacks: Callbacks;
   private cancelled = false;
@@ -37,6 +38,48 @@ export class BrowserVision {
   private firstFrameNumber = 0;
   private lastDeviceAt = 0;
   private metadata: DeviceEvidence | null = null;
+  private pulseSamples: RGBSample[] | null = null;
+  private pulseCanvas: HTMLCanvasElement | null = null;
+  private pulsePoints: Point[] = [];
+  private pulseFaceCount = 0;
+  private pulseMotion = false;
+  private previousNose: Point | null = null;
+  startPulse(): void {
+    this.pulseSamples = [];
+    this.pulseCanvas = document.createElement("canvas");
+    this.pulseCanvas.width = 320; this.pulseCanvas.height = 240;
+    this.previousNose = null;
+  }
+  stopPulse(): RGBSample[] {
+    const samples = this.pulseSamples ?? [];
+    this.pulseSamples = null; this.pulseCanvas = null;
+    this.pulsePoints = []; this.previousNose = null;
+    return samples;
+  }
+  getPulseSamples(): RGBSample[] { return this.pulseSamples ? [...this.pulseSamples] : []; }
+  private samplePulse(t: number): void {
+    const canvas = this.pulseCanvas, video = this.video, points = this.pulsePoints;
+    if (!this.pulseSamples || !canvas || !video || this.pulseFaceCount !== 1 || points.length < 468) return;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    if (!ctx) return;
+    ctx.drawImage(video, 0, 0, 320, 240);
+    const regions = [
+      { x: (points[109].x + points[338].x) / 2, y: (points[10].y + points[9].y) / 2 },
+      points[50], points[280]
+    ];
+    let r = 0, g = 0, b = 0, count = 0;
+    for (const pt of regions) {
+      const x = Math.max(0, Math.min(306, Math.round(pt.x * 320) - 7));
+      const y = Math.max(0, Math.min(226, Math.round(pt.y * 240) - 7));
+      const pixels = ctx.getImageData(x, y, 14, 14).data;
+      for (let i = 0; i < pixels.length; i += 4) {
+        const rr = pixels[i], gg = pixels[i + 1], bb = pixels[i + 2];
+        if (Math.min(rr, gg, bb) < 12 || Math.max(rr, gg, bb) > 245) continue;
+        r += rr; g += gg; b += bb; count++;
+      }
+    }
+    if (count) this.pulseSamples.push({ t, r: r / count, g: g / count, b: b / count, motion: this.pulseMotion });
+  }
   constructor(callbacks: Callbacks) { this.callbacks = callbacks; }
   private interrupt = () => {
     if (this.cancelled) return;
@@ -97,25 +140,38 @@ export class BrowserVision {
         this.metadata.observedFps = Math.round((frame.presentedFrames - this.firstFrameNumber) * 1000 / (now - this.firstFrameAt) * 10) / 10;
         this.callbacks.device({ ...this.metadata }); this.lastDeviceAt = now;
       }
+      if (this.pulseSamples) this.samplePulse(now);
       this.measureFrames();
     });
   }
+  private fast = false;
+  private lastCost = 0;
+  /** Asks for ~20 Hz inference during the digits prompt. Honored only while one inference stays well inside a 50 ms budget. */
+  setFast(fast: boolean): void { this.fast = fast; }
   private loop = (now: number) => {
     if (this.cancelled || !this.video || !this.detector) return;
-    if (this.video.readyState >= 2 && now - this.lastInfer >= 100 && this.video.currentTime !== this.lastMediaTime) {
+    if (this.video.readyState >= 2 && now - this.lastInfer >= (this.fast && this.lastCost < 30 ? 50 : 100) && this.video.currentTime !== this.lastMediaTime) {
       this.lastInfer = now; this.lastMediaTime = this.video.currentTime;
       try {
+        const started = performance.now();
         const result = this.detector.detectForVideo(this.video, now);
+        this.lastCost = performance.now() - started;
         const faceCount = result.faceLandmarks.length;
         const points = faceCount === 1 ? result.faceLandmarks[0] : [];
+        this.pulseFaceCount = faceCount;
+        this.pulsePoints = points;
+        const nose = points[1];
+        this.pulseMotion = !!(nose && this.previousNose && Math.hypot(nose.x - this.previousNose.x, nose.y - this.previousNose.y) > 0.012);
+        this.previousNose = nose ? { ...nose } : null;
         const categories = result.faceBlendshapes?.[0]?.categories ?? [];
         const score = (name: string) => categories.find(c => c.categoryName === name)?.score ?? 0;
-        let yaw = 0;
+        let yaw = 0, mouthOpen = 0;
         if (points.length >= 468) {
+          mouthOpen = Math.abs(points[13].y - points[14].y) / Math.max(0.01, Math.abs(points[10].y - points[152].y));
           const left = points[33], right = points[263], nose = points[1];
           yaw = -(nose.x - (left.x + right.x) / 2) / Math.max(0.01, Math.abs(right.x - left.x));
         }
-        this.callbacks.metrics({ timestamp: now, faceCount, yaw, points,
+        this.callbacks.metrics({ timestamp: now, faceCount, yaw, mouthOpen, points,
           blinkLeft: score("eyeBlinkLeft"), blinkRight: score("eyeBlinkRight"), jawOpen: score("jawOpen") });
       } catch {
         this.callbacks.model("unavailable", "Landmark inference stopped. The affected evidence is unavailable; this session cannot approve.");
@@ -135,6 +191,6 @@ export class BrowserVision {
     if (this.video) { this.video.pause(); this.video.srcObject = null; }
     this.video = null;
     this.detector?.close(); this.detector = null;
-    this.metadata = null;
+    this.metadata = null; this.stopPulse();
   }
 }

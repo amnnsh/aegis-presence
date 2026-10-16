@@ -1,6 +1,7 @@
 import * as React from "react";
 import type { Decision, DecisionResult, Provenance } from "../lib/types.ts";
 import { SIGNALS } from "../lib/risk.ts";
+import { apiConfigured } from "../lib/api.ts";
 
 export type IconName = "shield" | "arrow" | "camera" | "eye" | "sun" | "scan" | "audio" | "lock" | "layers" | "check" | "close" | "activity" | "code" | "refresh" | "info" | "play" | "search" | "chevron" | "globe";
 const paths: Record<IconName, React.ReactNode> = {
@@ -33,26 +34,35 @@ export function Header({ active = "overview" }: { active?: "overview" | "verify"
     <a href="/" aria-current={active === "overview" ? "page" : undefined}>Overview</a>
     <a href="/verify/" aria-current={active === "verify" ? "page" : undefined}>Verification</a>
     <a href="/admin/" aria-current={active === "admin" ? "page" : undefined}>Activity <span className="nav-demo">demo</span></a>
-  </nav><span className="header-status"><span className="dot" /> Browser-only prototype</span></div></header>;
+  </nav><span className="header-status"><span className="dot" /> {apiConfigured() ? "Prototype / on-device video" : "Browser-only prototype"}</span></div></header>;
 }
 export function Footer() {
   return <footer className="site-footer"><div><Brand /><span>Presence, not just appearance.</span></div><p>Hackathon prototype <span aria-hidden="true">/</span> Not a production identity check</p></footer>;
 }
-const sourceLabels: Record<Provenance, string> = { observed: "Observed", heuristic: "Heuristic", simulated: "Simulated", unavailable: "Unavailable" };
+const sourceLabels: Record<Provenance, string> = { observed: "Observed", heuristic: "Heuristic", server: "Server-checked", simulated: "Simulated", unavailable: "Unavailable" };
 export function SourceBadge({ source }: { source: Provenance }) { return <span className={`source-badge source-${source}`}>{sourceLabels[source]}</span>; }
 export function DecisionBadge({ decision }: { decision: Decision }) { return <span className={`decision-badge decision-${decision}`}><span className="dot" />{decision === "step-up" ? "Step-up" : decision === "approve" ? "Approve" : "Reject"}</span>; }
 export function PrivacyNote() {
-  return <div className="privacy-note"><Icon name="lock" size={15} /><span>Frames stay in this tab. No biometric uploads, recordings, or persistent session storage.</span></div>;
+  return <div className="privacy-note"><Icon name="lock" size={15} /><span>{apiConfigured() ? "Frames and microphone audio stay in this tab. No image, video, or audio is uploaded or recorded. Event timing and scores are kept by the verification server for up to 24 hours." : "Frames and microphone audio stay in this tab. The microphone is optional and used only for the spoken-digit prompt. No biometric uploads, recordings, or persistent session storage."}</span></div>;
 }
 export function PrototypeNotice() {
-  return <div className="notice notice-blue"><Icon name="info" size={18} /><p><strong>A transparent prototype, not a security guarantee.</strong> Browser heuristics can be fooled. Model-based checks are simulated and clearly marked. No score is an accuracy claim.</p></div>;
+  return <div className="notice notice-blue"><Icon name="info" size={18} /><p><strong>A transparent prototype, not a security guarantee.</strong> Browser heuristics can be fooled. The deepfake-artifact score is simulated and clearly marked; speech and lip-timing checks are untuned on-device heuristics. No score is an accuracy claim.</p></div>;
+}
+/** Says plainly whether a live result was recomputed by the backend, and what the freshness veto concluded. */
+function ServerLine({ result }: { result: DecisionResult }) {
+  const check = result.server;
+  if (!check) return <p className="server-line"><span className="source-badge source-unavailable">Local only &mdash; not server-checked</span></p>;
+  const flagged = check.freshness.risk >= 50;
+  return <div className="server-line"><p><SourceBadge source="server" /><span>Freshness: <strong className={flagged ? "freshness-flagged" : "freshness-clean"}>{flagged ? "flagged" : "clean"}</strong></span><span className="mono">Session {check.sessionId}</span></p>
+    <p className="microcopy">{check.freshness.detail}</p>
+    {check.token && <details><summary>Signed result token (EdDSA, valid 10 minutes)</summary><code className="mono token-box">{check.token}</code><p className="microcopy">The server recomputed this decision from the reported scores and signed it. Check it with POST /api/tokens/verify or the public key at /api/keys. The inputs still come from this browser.</p></details>}</div>;
 }
 export const signalIcons: IconName[] = ["camera", "eye", "sun", "scan", "audio"];
 export function ResultView({ result, onReset, sessionLabel, compact = false }: { result: DecisionResult; onReset?: () => void; sessionLabel?: string; compact?: boolean }) {
   const title = result.decision === "approve" ? "Low-risk demo outcome" : result.decision === "reject" ? "Do not continue this attempt" : "One more layer is needed";
   return <section className={`result-view ${compact ? "result-compact" : ""}`} aria-label="Verification result">
     <div className={`result-mode ${result.mode === "simulation" ? "mode-sim" : "mode-live"}`}><Icon name={result.mode === "simulation" ? "code" : "lock"} size={16} />{result.mode === "simulation" ? "ATTACK LAB / ALL INPUTS ARE SIMULATED" : "LIVE SESSION / CAMERA STOPPED"}{sessionLabel && <span className="mono">{sessionLabel}</span>}</div>
-    <div className="result-hero"><div><DecisionBadge decision={result.decision} /><h2>{title}</h2><p>{result.explanation}</p><span className="microcopy">Illustrative policy v0.1 <span aria-hidden="true">&middot;</span> Not an identity assertion</span></div><div className={`risk-dial risk-${result.decision}`} style={{ "--risk": `${result.risk * 3.6}deg` } as React.CSSProperties}><div><strong>{result.risk}<small>/100</small></strong><span>risk index</span></div></div></div>
+    <div className="result-hero"><div><DecisionBadge decision={result.decision} /><h2>{title}</h2><p>{result.explanation}</p><span className="microcopy">Illustrative policy v{result.server?.policyVersion ?? "0.1"} <span aria-hidden="true">&middot;</span> Not an identity assertion</span>{result.mode === "live" && <ServerLine result={result} />}</div><div className={`risk-dial risk-${result.decision}`} style={{ "--risk": `${result.risk * 3.6}deg` } as React.CSSProperties}><div><strong>{result.risk}<small>/100</small></strong><span>risk index</span></div></div></div>
     <div className="result-body"><div className="signal-section"><div className="section-heading"><h3>Five signals. One decision.</h3><span className="microcopy">Higher score = higher risk</span></div>
       {SIGNALS.map((meta, i) => { const signal = result.signals.find(s => s.id === meta.id)!; const used = result.contributions.find(s => s.id === meta.id)!;
         return <div className="signal-result" key={meta.id}><div className="signal-result-top"><span className="signal-icon"><Icon name={signalIcons[i]} /></span><div className="signal-result-label"><h4>{meta.title}</h4><span>{meta.weight}% policy weight</span></div><SourceBadge source={signal.provenance} /><strong className="signal-number">{signal.risk === null ? "N/A" : <>{signal.risk}<small>/100</small></>}</strong></div>

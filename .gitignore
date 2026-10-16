@@ -19,3 +19,13 @@ Thumbs.db
 public/mediapipe/wasm/
 public/models/*.task
 public/models/*.partial
+public/models/whisper/
+public/ort/
+# Backend (Python)
+backend/.venv/
+__pycache__/
+.pytest_cache/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm

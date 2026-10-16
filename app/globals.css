@@ -38,3 +38,10 @@
 @media(max-width:680px){.camera-surface{max-height:350px}.header-inner nav a{font-size:11px}.prompt-card>p{font-size:12px}.consent{font-size:11px}.consent small{font-size:10px}.prompt-actions .button{font-size:11px}.notice p{font-size:11px}.signal-result>p{font-size:11px}.result-hero p{font-size:12px}.source-badge{font-size:10px}.signal-result-top .source-badge{font-size:9px}}
 
 .table-scroll{position:relative}.attempts-panel{padding:0}
+.source-server{background:#e4eefb;color:#2f5f93}.server-line{display:grid;gap:6px;margin-top:12px;font-size:11px;color:var(--muted)}.server-line>p:first-child{display:flex;flex-wrap:wrap;align-items:center;gap:8px}.server-line .source-badge{margin-left:0;font-size:10px}.server-line .mono{font-size:10px;overflow-wrap:anywhere}.freshness-clean{color:var(--green)}.freshness-flagged{color:var(--amber)}.server-line summary{cursor:pointer;font-size:11px}.token-box{display:block;margin:6px 0;padding:8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);font-size:10px;overflow-wrap:anywhere;user-select:all}
+.live-panel{padding:0;margin-bottom:22px}.live-connect{display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:14px 18px}.live-connect .search-box{flex:1 1 220px;max-width:340px}.live-connect>.microcopy{flex-basis:100%}.live-summary,.live-link,.live-detail{padding:0 18px 14px}.live-panel>.notice{margin:0 18px 16px}
+
+/* Experimental pulse readout */
+.pulse-readout { display:flex; align-items:center; justify-content:space-between; gap:1rem; margin:1.5rem 0 .75rem; }
+.pulse-readout strong { font-size:clamp(1.6rem,4vw,2.4rem); }
+.pulse-wave { display:block; width:100%; height:90px; margin-bottom:1.5rem; color:#63d9bc; border-radius:12px; background:rgba(40,140,130,.10); }
