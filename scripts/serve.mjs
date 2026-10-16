@@ -8,6 +8,13 @@ if (!existsSync(resolve(root, "index.html"))) { console.error("No export found. 
 const arg = process.argv.indexOf("--port");
 const port = Number(arg >= 0 ? process.argv[arg + 1] : process.env.PORT || 3000);
 const headers = JSON.parse(readFileSync(resolve(import.meta.dirname, "../vercel.json"), "utf8")).headers[0].headers;
+// Local preview only: also allow the API the bundle was built against (e.g. http://localhost:8000).
+// Production CSP comes from vercel.json alone, where the deployed API origin is hardcoded.
+if (process.env.NEXT_PUBLIC_API_URL) {
+  const origin = new URL(process.env.NEXT_PUBLIC_API_URL).origin;
+  const csp = headers.find(h => h.key === "Content-Security-Policy");
+  csp.value = csp.value.replace("connect-src 'self'", `connect-src 'self' ${origin}`);
+}
 const mime = { ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css", ".json": "application/json", ".wasm": "application/wasm", ".svg": "image/svg+xml", ".png": "image/png", ".task": "application/octet-stream", ".ico": "image/x-icon" };
 createServer(async (req, res) => {
   headers.forEach(h => res.setHeader(h.key, h.value));
@@ -19,6 +26,7 @@ createServer(async (req, res) => {
     if ((await stat(path)).isDirectory()) path = resolve(path, "index.html");
     const bytes = await readFile(path);
     res.setHeader("Content-Type", mime[extname(path)] || "application/octet-stream");
+    res.setHeader("Content-Length", bytes.length);
     res.writeHead(200); res.end(req.method === "HEAD" ? undefined : bytes);
   } catch { res.writeHead(404); res.end("Not found"); }
 }).listen(port, "127.0.0.1", () => console.log(`Aegis static export: http://localhost:${port}`));

@@ -22,7 +22,7 @@ export function cameraError(error: unknown): string {
   return error instanceof Error ? error.message : "Camera could not start. Use HTTPS or localhost and open the site directly, not inside a preview frame.";
 }
 
-/** Owns every hardware/model resource. No persistence, uploads, audio, or recording APIs. */
+/** Owns every camera/model resource. No persistence, uploads, or recording APIs. The microphone lives in lib/audio.ts. */
 export class BrowserVision {
   private callbacks: Callbacks;
   private cancelled = false;
@@ -100,22 +100,29 @@ export class BrowserVision {
       this.measureFrames();
     });
   }
+  private fast = false;
+  private lastCost = 0;
+  /** Asks for ~20 Hz inference during the digits prompt. Honored only while one inference stays well inside a 50 ms budget. */
+  setFast(fast: boolean): void { this.fast = fast; }
   private loop = (now: number) => {
     if (this.cancelled || !this.video || !this.detector) return;
-    if (this.video.readyState >= 2 && now - this.lastInfer >= 100 && this.video.currentTime !== this.lastMediaTime) {
+    if (this.video.readyState >= 2 && now - this.lastInfer >= (this.fast && this.lastCost < 30 ? 50 : 100) && this.video.currentTime !== this.lastMediaTime) {
       this.lastInfer = now; this.lastMediaTime = this.video.currentTime;
       try {
+        const started = performance.now();
         const result = this.detector.detectForVideo(this.video, now);
+        this.lastCost = performance.now() - started;
         const faceCount = result.faceLandmarks.length;
         const points = faceCount === 1 ? result.faceLandmarks[0] : [];
         const categories = result.faceBlendshapes?.[0]?.categories ?? [];
         const score = (name: string) => categories.find(c => c.categoryName === name)?.score ?? 0;
-        let yaw = 0;
+        let yaw = 0, mouthOpen = 0;
         if (points.length >= 468) {
+          mouthOpen = Math.abs(points[13].y - points[14].y) / Math.max(0.01, Math.abs(points[10].y - points[152].y));
           const left = points[33], right = points[263], nose = points[1];
           yaw = -(nose.x - (left.x + right.x) / 2) / Math.max(0.01, Math.abs(right.x - left.x));
         }
-        this.callbacks.metrics({ timestamp: now, faceCount, yaw, points,
+        this.callbacks.metrics({ timestamp: now, faceCount, yaw, mouthOpen, points,
           blinkLeft: score("eyeBlinkLeft"), blinkRight: score("eyeBlinkRight"), jawOpen: score("jawOpen") });
       } catch {
         this.callbacks.model("unavailable", "Landmark inference stopped. The affected evidence is unavailable; this session cannot approve.");

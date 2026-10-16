@@ -37,6 +37,43 @@ Use the steps in `DEPLOYMENT.md`. Record the actual OS/browser/device and releas
 
 Manually test allow, deny, no camera, busy camera, blocked model, multiple faces, no face, skipped/expired challenge, optional-light skip, hidden-tab cancellation, navigation during an unresolved permission prompt, and camera closure after the result. Refresh should remove live session results, and the admin should remain fictional. Inspect network/storage behavior and production security headers.
 
+## Spoken digits and lip / voice timing (added October 13, 2026)
+
+### Executed
+
+- `npm run check` passed: type-check, 56 unit tests, and the static build. The new tests cover the correlation (`tests/sync.test.ts`), transcript handling (`tests/digits.test.ts`), and the changed liveness / policy behavior.
+- The built export was driven in headless Chrome on Windows 11 with the production headers from `vercel.json`. The camera was a blank canvas stream (no face) and the microphone was a stand-in stream playing Windows text-to-speech digit words. This exercises the worklet, the speech worker, the self-hosted model, and the UI. It is **not** a human test.
+
+| Scenario (synthetic voice, no face) | Runs | Result |
+| --- | --- | --- |
+| Voice reads the prompted digits | 3 | "Heard" matched 4/4 in all 3 (prompts 3671, 9149, 2292) |
+| Voice reads four different digits | 1 | 0/4 matched, liveness risk raised |
+| Silence | 1 | "No digits were heard", digits unavailable, recording stopped at the 8 s cap |
+| Microphone box unchecked | 1 | Microphone never requested; digits mouth-only; sync unavailable |
+| Speech model requests blocked | 1 | Fallback message shown; digits not verified; nothing simulated |
+
+In every run the microphone track ended when the digits prompt ended, the page made no request outside its own origin, and the sync signal was "unavailable" because there was no face to measure. An earlier run with a 0.9 s end-of-speech pause cut one prompt short ("Heard: 2 6" of 2605); the pause was raised to 1.5 s.
+
+### NOT executed: the acceptance runs
+
+Nobody has yet run this with a real face and a real voice, so **lip / voice timing has never produced a measured value**, and the thresholds in `lib/sync.ts` (peak correlation 0.5 / 0.3, lag within 200 ms, voiced fraction 0.1) are untested starting points. Do not quote them as tuned. Fill in the table below on the presentation laptop; the numbers appear in the Audio-visual sync row of the result view.
+
+Device: ____  Browser and version: ____  Microphone: ____  Room: ____  Date: ____
+
+| Run | Condition | Heard / prompted | Digits matched | Peak correlation | Lag (ms) | Voiced % | Sync risk |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | Reads digits normally | | | | | | |
+| 2 | Reads digits normally | | | | | | |
+| 3 | Reads digits normally | | | | | | |
+| 4 | Reads digits normally | | | | | | |
+| 5 | Reads digits normally | | | | | | |
+| 6 | Mouths silently while another person reads aloud | | | | | | |
+| 7 | Plays a recording of different digits | | | | | | |
+
+Expected if the starting thresholds hold: runs 1 to 5 mostly give sync risk 15 to 40; run 6 gives a high sync risk; run 7 fails the digit match. If the measured lag sits at a steady offset (camera and microphone latency are not compensated) or genuine readings land below 0.3, change the constants in `SYNC` and record the before and after numbers here.
+
+Known limits to keep in the pitch: the digit check verifies words, not the speaker, so a cloned or replayed voice saying the right digits passes it; the timing check is a loudness / mouth-opening correlation that a face animated from the same audio would also pass; background speech, a covered mouth, or poor light can fail a genuine user.
+
 ## Security/evaluation status
 
 No labeled deepfake benchmark, anti-spoofing certification, penetration test, demographic evaluation, calibrated probability, independence proof, or accessibility certification was performed. All fixture risks and policy weights are illustrative. A high-risk live heuristic is not proof of fraud. A low-risk synthetic fixture is not proof of a person's identity. The frontend is client-tamperable and must not authorize access.

@@ -2,7 +2,7 @@
 
 Follow these steps in order. Commands are run in the extracted **`aegis` project directory** unless a step says otherwise. Replace `YOUR-OWNER`, `YOUR-PROJECT`, and identity placeholders with your actual values; do not include angle brackets. `YOUR-OWNER` can be your GitHub username or your team's organization name.
 
-**Prepared October 5, 2026.** Dashboard labels and plan restrictions can change; official references are at the end. This is a static Next.js frontend with no application backend, database, API keys, or secret environment variables. Your team performs the account actions and deployment. No repository or hosted deployment has already been created.
+**Prepared October 5, 2026.** Dashboard labels and plan restrictions can change; official references are at the end. This is a static Next.js frontend. Steps 1 to 10 deploy it on its own, with no application backend, database, API keys, or secret environment variables. Step 11 adds the optional API in `backend/`, which does have secrets. Your team performs the account actions and deployment. No repository or hosted deployment has already been created.
 
 **Release gate:** the authoring environment could not install external dependencies or run a full Next.js build. Run the commands below and do not submit until they pass. Source-component browser checks are not a substitute for this gate.
 
@@ -277,7 +277,7 @@ Confirm these values before **Deploy**:
 | Build Command | `npm run build` |
 | Install Command | `npm ci` after committing your generated lockfile |
 | Output Directory | `out` (configured in `vercel.json`; this is an intentional static export) |
-| Environment Variables | None |
+| Environment Variables | None for the local-only build. With the API (step 11): `NEXT_PUBLIC_API_URL` only, which is public. |
 | Node.js Version | **24.x** |
 
 If the import screen does not expose Node version, set it under **Project -> Settings -> Build and Deployment -> Node.js Version**, then redeploy. The project uses `output: "export"`; do not run a persistent `next start` process or invent a database configuration.
@@ -319,6 +319,8 @@ Complete browser login. During `link`, choose the correct account/team, choose a
 Open the deployed **HTTPS** URL directly on a desktop browser and a physical phone. Send the URL to the phone; a phone's own `localhost` is not your laptop. Do not demo inside an iframe, an in-app social browser, or an IDE preview.
 
 Run a live session with explicit permission, then check cancel, restart, skip, no-camera, hidden-tab, and result states. The browser's camera indicator should stop when the session ends. Do not confuse a retained site permission with an actively running camera. Try Chrome on desktop/Android and Safari on iPhone; the actual device/model combination must be validated. When a browser cannot initialize landmarks, the UI must show unavailable evidence and step-up, not a pass.
+
+**Microphone (optional):** tick the microphone box, allow the prompt, and read the digits aloud. Expect 'Heard: x x x x' after a short on-device check, and the browser's microphone indicator to go out as soon as the digits prompt ends. Deny the prompt once as well: the session must continue with digits as mouth motion only and lip / voice timing unavailable. The first use downloads about 65 MB of speech model and runtime from your own origin, so rehearse once on the presentation network. In DevTools Network, confirm requests under `/models/whisper/` and `/ort/` go to your own origin and that nothing is sent anywhere while you speak.
 
 In desktop DevTools **Network**, filter by Fetch/XHR and media, and verify that model/WASM requests go to your own origin and that the app is not sending video/audio uploads. In **Application**, verify the app has not written session data to localStorage/IndexedDB or introduced analytics cookies. Normal static asset requests and hosting request logs still exist.
 
@@ -384,6 +386,92 @@ Record the deployed commit SHA (`git rev-parse HEAD` after pulling the merge) in
 - [ ] **Freeze:** choose a release coordinator, stop risky changes before judging, note the last known-good Vercel deployment, and keep the stable URL in the form. A failed new deployment should not be "fixed" by weakening safeguards.
 
 If a recent release is broken, use Vercel's deployment history to restore the last known-good deployment, and use a reviewed `git revert BAD-COMMIT-SHA` change to align the source with the restored behavior. Do not hard-reset or force-push a shared main branch during judging.
+
+## 11. Optional: deploy the API and connect the frontend
+
+Skip this step for a browser-only demo. The API (`backend/`, see `backend/README.md`) issues single-use challenge plans, checks reported event timing, recomputes and signs the decision, and feeds the dashboard. It stores outcomes and timing events, never media. It does **not** authenticate the camera; do not present it as if it did.
+
+### 11.1 Secrets and settings
+
+Generate two secrets on your own machine and keep them out of Git, chat, and screenshots:
+
+```sh
+python -c "import secrets; print(secrets.token_urlsafe(32))"                                  # ADMIN_TOKEN
+python -c "import base64, secrets; print(base64.b64encode(secrets.token_bytes(32)).decode())"  # SIGNING_KEY_B64
+```
+
+| Variable | Value for a hosted demo |
+| --- | --- |
+| `DB_PATH` | `/data/aegis.db` (the Dockerfile default). On a host without a persistent disk the file is lost on restart, which only loses up to 24 hours of demo history. |
+| `RETENTION_HOURS` | `24` |
+| `SIGNING_KEY_B64` | The generated seed. If it is missing the server logs a loud warning and uses a throwaway key. |
+| `ADMIN_TOKEN` | The generated token. If it is missing, admin endpoints answer 503. |
+| `ALLOWED_ORIGINS` | Your stable frontend origin, for example `https://YOUR-PROJECT.vercel.app`. No trailing slash. Add preview origins only if you need them. |
+| `FRONTEND_ORIGIN` | The same stable frontend origin; used in help-desk links. |
+
+**Never put `ADMIN_TOKEN` or `SIGNING_KEY_B64` in Vercel or in any `NEXT_PUBLIC_*` variable.** Everything `NEXT_PUBLIC_*` is shipped to every visitor. The dashboard asks the operator to type the admin token instead.
+
+### 11.2 One instance only
+
+sqlite is a local file, and the dashboard stream and the rate limiter live in process memory. Run exactly **one instance with one worker**. Two instances would each see half the sessions and the dashboard would miss events. To scale later, move storage to a shared database such as Firestore and replace the in-memory stream with a shared pub/sub.
+
+### 11.3 Render or Railway
+
+Both build `backend/Dockerfile` directly and provide `$PORT`.
+
+- **Render:** New -> Web Service -> connect the repo -> Root Directory `backend` -> Runtime **Docker** -> one instance -> add the variables above -> Health Check Path `/api/health`. Free instances sleep when idle, so open the health URL before presenting.
+- **Railway:** New Project -> Deploy from GitHub repo -> service Settings -> Root Directory `backend` (the Dockerfile is detected) -> add the variables -> Networking -> Generate Domain. Keep replicas at 1.
+
+Add a persistent disk or volume mounted at `/data` if you want history to survive a restart.
+
+### 11.4 Google Cloud Run
+
+```sh
+gcloud run deploy aegis-api --source backend --region YOUR-REGION \
+  --allow-unauthenticated --min-instances=1 --max-instances=1 --no-cpu-throttling --timeout=3600 \
+  --set-env-vars "ALLOWED_ORIGINS=https://YOUR-PROJECT.vercel.app,FRONTEND_ORIGIN=https://YOUR-PROJECT.vercel.app,RETENTION_HOURS=24" \
+  --set-secrets "ADMIN_TOKEN=aegis-admin-token:latest,SIGNING_KEY_B64=aegis-signing-key:latest"
+```
+
+`--min-instances=1 --max-instances=1` is required for the reason in 11.2. `--no-cpu-throttling` keeps the hourly retention sweep and the dashboard stream alive between requests, and `--timeout=3600` lets a dashboard stream stay open for up to an hour (the browser reconnects after that). Create the two secrets in Secret Manager first (`gcloud secrets create ... --data-file=-`) and grant the service account access. The container filesystem is in memory and is erased on every new revision or restart; that is acceptable for a demo, and it is the point at which you would swap storage to Firestore. A minimum instance is billed while idle: delete the service after the event.
+
+### 11.5 Point the frontend at the API
+
+1. **Vercel -> Project -> Settings -> Environment Variables:** add `NEXT_PUBLIC_API_URL` = your API origin, for example `https://aegis-api-xxxxx.a.run.app`, for Production (and Preview if wanted). It is a public URL, not a secret.
+2. **`vercel.json`:** the Content-Security-Policy is static JSON and cannot read environment variables, so the API origin is **hardcoded** in `connect-src`. The repository ships the placeholder `https://aegis-api.example.com`. Replace it with your real API origin, keep `'self'` first, commit, and push:
+
+   ```text
+   connect-src 'self' https://aegis-api-xxxxx.a.run.app;
+   ```
+
+   If these two values disagree, the browser blocks every API call and the app silently falls back to local-only mode. That is the first thing to check when a deployed result says "Local only - not server-checked".
+3. Redeploy. `NEXT_PUBLIC_*` values are baked in at build time; changing the variable without a new build changes nothing.
+
+For a local production-header preview, set the variable for both commands; `scripts/serve.mjs` then adds that origin to `connect-src` on your machine only:
+
+```sh
+NEXT_PUBLIC_API_URL=http://localhost:8000 npm run build
+NEXT_PUBLIC_API_URL=http://localhost:8000 npm run start
+```
+
+### 11.6 Check it
+
+- `https://YOUR-API/api/health` answers `{"status":"ok",...}`.
+- A webcam session ends with a **Server-checked** badge, a session id, and a signed token. Paste the token into `POST /api/tokens/verify` and expect `"valid": true`.
+- Until the challenge layer reports cue/response timing, the freshness line reads **flagged** with "no cue/response pairs were reported". That is the honest state of the current client, not a failure.
+- `/admin/` -> enter the admin token -> the session appears, and new ones arrive without a reload. Create a help-desk link, open it once on another device, and confirm a second open is refused.
+- Stop the API and run a session again: it must still finish, marked **Local only - not server-checked**.
+- In DevTools Network, confirm requests to the API carry only JSON scores and timing, and no image, video, or audio.
+
+| Symptom | Check |
+| --- | --- |
+| Always "Local only" in production | `connect-src` in `vercel.json` matches `NEXT_PUBLIC_API_URL`; the site was rebuilt; `ALLOWED_ORIGINS` contains the exact frontend origin. |
+| CORS error in the console | `ALLOWED_ORIGINS` has the origin with scheme, without a trailing slash or path. |
+| Dashboard says 401 | The typed token differs from `ADMIN_TOKEN`. 503 means `ADMIN_TOKEN` is not set on the server. |
+| Dashboard misses sessions | More than one instance or worker is running. |
+| Tokens stop verifying after a restart | `SIGNING_KEY_B64` is not set, so each start generates a new key. |
+
+After the event, rotate `ADMIN_TOKEN` (the stream endpoint carries it in a URL, which intermediaries may log) and delete the service.
 
 ## Official references
 

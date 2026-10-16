@@ -15,7 +15,7 @@
 
 </div>
 
-> **Hackathon prototype — not a production identity-verification service.** Camera and liveness checks are experimental heuristics; deepfake-artifact and audio-visual scores are simulated. Live verification deliberately cannot approve a user.
+> **Hackathon prototype — not a production identity-verification service.** Camera, liveness, spoken-digit, and lip / voice timing checks are experimental, untuned heuristics; the deepfake-artifact score is simulated. Live verification deliberately cannot approve a user.
 
 ## 🚨 The challenge
 
@@ -26,10 +26,10 @@ A convincing face on a screen is not proof that a real person is present. Replay
 | Layer | Demo capability | Reality check |
 | --- | --- | --- |
 | 📷 Camera integrity | Reads browser-exposed camera metadata and frame cadence | Spoofable signals; not hardware attestation |
-| 👁️ Active liveness | Random head turn, two blinks, and a four-digit mouth-movement prompt using MediaPipe | Does **not** recognize spoken digits or certify liveness |
+| 👁️ Active liveness | Random head turn, two blinks, and a four-digit prompt. With the optional microphone, an on-device speech model (Whisper tiny) checks the spoken digits | Checks the words, not the speaker. Without the microphone it is mouth motion only. Does not certify liveness |
 | 🌈 Screen-light response | Optional six-step color stimulus and cheek-color sampling | Experimental; affected by lighting, exposure, and movement |
 | 🧩 Deepfake artifacts | Explains how a forensic signal would affect risk | **Simulated**; no forensic model runs |
-| 🔊 Audio-visual sync | Shows a hypothetical synchronization signal | **Simulated**; no microphone or speech recognition |
+| 🔊 Audio-visual sync | With the optional microphone, correlates mouth opening with loudness during the digits prompt, on-device | Untuned correlation heuristic, **not** a lip-sync model. Unavailable (never simulated) without the microphone |
 | ⚖️ Explainable risk | Weighted local score, provenance, missing-evidence handling | Illustrative policy, **not** a fraud probability |
 | 🧪 Attack lab | Four fixed scenarios demonstrating approve / step-up / reject | Fictional fixtures, **not** measured detection results |
 
@@ -41,7 +41,7 @@ A convincing face on a screen is not proof that a real person is present. Replay
 4. **Explore the [attack lab](https://aegis-presence-inky.vercel.app/verify/?mode=lab)** without camera access.
 5. **Visit `/admin/`** for a searchable dashboard of fictional attempts (not real users).
 
-**Privacy first:** Camera inference runs locally in the browser. The application does not request microphone access, upload biometric video, create user accounts, or persist verification sessions. Hosting providers may still collect ordinary request logs.
+**Privacy first:** Camera inference runs locally in the browser. The microphone is requested only if you tick its separate consent box, and only for the spoken-digit prompt: audio is held in memory for at most 8 seconds, transcribed and compared with lip movement on your device by a self-hosted model, then discarded. No audio, transcript, image, or video is uploaded, and the Web Speech API (which can send audio to a cloud service) is deliberately not used. The application does not create user accounts or persist verification sessions in the browser. Hosting providers may still collect ordinary request logs.
 
 ## 🏗️ How it works
 
@@ -62,7 +62,9 @@ flowchart TD
     H --> J[Risk breakdown and decision]
 ```
 
-The site is a **static Next.js application**. It has no application backend or API-based identity-verification service. The model and MediaPipe WASM assets are prepared during setup and served from the same origin. Browser-generated risk values are not tamper-proof authorization decisions.
+The site is a **static Next.js application**. The model and MediaPipe WASM assets are prepared during setup and served from the same origin. Browser-generated risk values are not tamper-proof authorization decisions.
+
+**Optional backend.** [`backend/`](backend/README.md) is a small FastAPI service. When the site is built with `NEXT_PUBLIC_API_URL`, each live session gets a fresh single-use challenge plan, reports event timing (numbers and short enums; never frames or audio), and receives a decision that the server recomputed and signed. The server checks the *consistency and freshness of reported events*. It does not see the camera and does not authenticate it, and the signal scores still originate in the browser. Without the variable, or when the API is unreachable, the app behaves exactly as before and labels the result **Local only - not server-checked**.
 
 ## 🧠 Risk scoring — transparent by design
 
@@ -116,7 +118,7 @@ npm run dev
 
 Open **http://localhost:3000**.
 
-The install process prepares MediaPipe WASM and downloads a versioned face-landmark model. If asset preparation warns or fails, retry with:
+The install process prepares MediaPipe WASM, downloads a versioned face-landmark model, and downloads a pinned, checksum-verified speech model (about 43 MB) plus the ONNX runtime into `public/`. Set `AEGIS_SKIP_SPEECH_MODEL=1` to skip the speech model; spoken digits then fall back to mouth motion only. If asset preparation warns or fails, retry with:
 
 ```bash
 npm run assets
@@ -140,6 +142,19 @@ npx playwright install chromium
 npm run test:browser
 ```
 
+**Optional backend** (Python 3.11+), in a second terminal:
+
+```bash
+cd backend
+python -m venv .venv && . .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements-dev.txt
+cp .env.example .env                            # set ADMIN_TOKEN and SIGNING_KEY_B64
+uvicorn app.main:create_app --factory --env-file .env --port 8000
+pytest
+```
+
+Then start the site with `NEXT_PUBLIC_API_URL=http://localhost:8000 npm run dev` (PowerShell: `$env:NEXT_PUBLIC_API_URL = "http://localhost:8000"; npm.cmd run dev`). Details: **[backend/README.md](backend/README.md)**.
+
 For deployment, authentication, troubleshooting, and release checks, see **[DEPLOYMENT.md](DEPLOYMENT.md)** and **[docs/QA_REPORT.md](docs/QA_REPORT.md)**. Do not claim that tests passed until they run successfully in your environment.
 
 ## 🗂️ Repository guide
@@ -153,6 +168,13 @@ lib/injection.ts        Camera metadata heuristics
 lib/reflection.ts       Optional color-response experiment
 lib/risk.ts             Weighted policy and missing evidence
 lib/scenarios.ts        Simulated attack fixtures
+lib/audio.ts            Optional microphone capture (AudioWorklet), in memory only
+lib/speech.ts           Digits prompt: recording, on-device transcription, fallback
+lib/asr.worker.ts       Whisper tiny in a Web Worker (Transformers.js), self-hosted
+lib/digits.ts           Transcript-to-digits normalization and matching
+lib/sync.ts             Lip / voice timing correlation
+lib/api.ts              Optional backend client, local-only fallback
+backend/                FastAPI service: plans, timing checks, signed results
 tests/                  Unit and browser tests
 scripts/                Assets and static preview
 DEPLOYMENT.md           Deployment walkthrough
@@ -166,7 +188,7 @@ docs/QA_REPORT.md       Test evidence and release gaps
 - **No identity assertion:** Matching an enrolled person's identity is outside this prototype.
 - **No production security boundary:** Client-side code and scores can be modified by an attacker.
 - **No validated spoof-detection performance:** Camera, gesture, and color heuristics share limitations and may fail on legitimate users.
-- **No real forensic models:** Deepfake-artifact and audio-visual synchronization values are demonstrations only.
+- **No real forensic models:** The deepfake-artifact value is a demonstration only. Lip / voice timing is a simple correlation with thresholds that have **not** been tuned or measured on recordings (see the QA report); the spoken-digit check verifies words, not who said them, and a replayed or synthesized voice reading the right digits passes it.
 - **No real admin telemetry:** Dashboard records are fictional; live sessions are not saved there.
 - **Accessible alternatives matter:** Challenges can be skipped; skipping adds uncertainty rather than silently passing or proving fraud.
 

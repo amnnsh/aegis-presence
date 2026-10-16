@@ -48,7 +48,7 @@ test("mock dashboard filters and opens evidence", async ({ page }) => {
 test("static production headers restrict capture and external connections", async ({ request }) => {
   const response = await request.get("/verify/");
   expect(response.ok()).toBe(true);
-  expect(response.headers()["permissions-policy"]).toContain("microphone=()");
+  expect(response.headers()["permissions-policy"]).toContain("microphone=(self)"); // on-device spoken-digit check; audio never leaves the tab
   expect(response.headers()["content-security-policy"]).toContain("connect-src 'self'");
   expect(response.headers()["x-frame-options"]).toBe("DENY");
 });

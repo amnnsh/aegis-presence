@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { evaluateRisk, SIGNALS } from "../lib/risk.ts";
 import { scenarioResult, SCENARIOS } from "../lib/scenarios.ts";
+import { syncSignal } from "../lib/sync.ts";
 import type { Signal } from "../lib/types.ts";
 const observed = (score: number): Signal[] => SIGNALS.map(s => ({ id: s.id, risk: score, provenance: "heuristic", detail: "Unit-test input" }));
 test("weights sum to 100", () => assert.equal(SIGNALS.reduce((sum, s) => sum + s.weight, 0), 100));
@@ -51,4 +52,23 @@ test("multiple high usable signals can yield an illustrative live reject", () =>
 });
 test("input objects are not mutated", () => {
   const rows = observed(12); const before = structuredClone(rows); evaluateRisk(rows, "live"); assert.deepEqual(rows, before);
+});
+test("a measured lip / voice timing signal counts in live mode; an unavailable one costs 60", () => {
+  const others = observed(10).filter(s => s.id !== "sync");
+  const measured = evaluateRisk([...others, syncSignal({ peakCorr: 0.7, lagMs: 60, voicedFraction: 0.5 })], "live");
+  assert.equal(measured.coverage, 100); assert.equal(measured.risk, 11);
+  assert.equal(measured.contributions.find(c => c.id === "sync")!.substituted, false);
+  const silent = evaluateRisk([...others, syncSignal({ peakCorr: 0.7, lagMs: 60, voicedFraction: 0 })], "live");
+  assert.equal(silent.coverage, 85); assert.equal(silent.risk, 18);
+  assert.equal(silent.contributions.find(c => c.id === "sync")!.usedRisk, 60);
+});
+test("a real sync result still cannot approve a live session", () => {
+  const result = evaluateRisk([...observed(0).filter(s => s.id !== "sync"), syncSignal({ peakCorr: 0.9, lagMs: 0, voicedFraction: 0.6 })], "live");
+  assert.equal(result.decision, "step-up");
+  assert.ok(result.reasons.some(reason => reason.includes("unvalidated heuristics")));
+});
+test("poor lip / voice timing is named in the decision trace", () => {
+  const result = evaluateRisk([...observed(10).filter(s => s.id !== "sync"), syncSignal({ peakCorr: 0.1, lagMs: 0, voicedFraction: 0.6 })], "live");
+  assert.equal(result.contributions.find(c => c.id === "sync")!.usedRisk, 80);
+  assert.ok(result.reasons.some(reason => reason.startsWith("Audio-visual sync: 80/100")));
 });

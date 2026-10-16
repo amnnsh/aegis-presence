@@ -26,10 +26,11 @@ export function challengeTitle(c: Challenge): string {
   if (c.kind === "blink") return "Blink twice, naturally";
   return `Read ${c.digits?.split("").join(" ")} aloud`;
 }
-export function challengeHint(c: Challenge): string {
+export function challengeHint(c: Challenge, microphone = false): string {
   if (c.kind === "head") return `Look straight ahead first. Then move your nose toward the ${c.direction} edge of the mirrored preview and return to center.`;
   if (c.kind === "blink") return "Keep both eyes visible. Fully open your eyes between each blink.";
-  return "Only mouth movement is observed. The digits and your voice are NOT recognized or verified. No microphone is used.";
+  if (microphone) return "Read all four digits aloud at a steady pace, then pause. Your voice is transcribed and compared with your lip movement on this device. No audio is uploaded or kept.";
+  return "Only mouth movement is observed. The digits and your voice are NOT recognized or verified. The microphone is off.";
 }
 
 /** Stateful, per-challenge gesture heuristics. Resets on face loss/multiple faces. */
@@ -104,8 +105,14 @@ export class GestureTracker {
 }
 export function livenessSignal(results: ChallengeResult[]): Signal {
   const measured = results.filter(r => r.status === "observed");
-  if (measured.length === 0) return { id: "liveness", risk: null, provenance: "unavailable", detail: "No completed head / blink evidence. Speech is not verified." };
+  if (measured.length === 0) return { id: "liveness", risk: null, provenance: "unavailable", detail: "No completed head / blink / spoken-digit evidence." };
   const values = ["head", "blink", "digits"].map(kind => results.find(r => r.kind === kind)?.risk ?? 60);
+  const gestures = measured.filter(r => r.kind !== "digits").length;
+  // Digits count as recognized only when the on-device speech model produced a transcript (status "observed").
+  const digits = results.find(r => r.kind === "digits");
+  const spoken = digits?.status === "observed" && typeof digits.matched === "number"
+    ? `Spoken digits: ${digits.matched}/4 recognized on-device, contributing risk ${digits.risk}.`
+    : "Digit content is unverified and contributes risk 60.";
   return { id: "liveness", risk: Math.round(values.reduce((a, b) => a + b, 0) / 3), provenance: "heuristic",
-    detail: `${measured.length}/2 head / blink gestures observed. Digit content is unverified and contributes risk 60. These are motion heuristics, not proof of liveness or identity.` };
+    detail: `${gestures}/2 head / blink gestures observed. ${spoken} These are motion and speech-content heuristics, not proof of liveness or identity.` };
 }
