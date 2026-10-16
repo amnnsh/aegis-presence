@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { crossCorrelate, resample, syncSignal, voiceThreshold } from "../lib/sync.ts";
 import type { Sample } from "../lib/sync.ts";
-import { resampleTo } from "../lib/audio.ts";
+import { normalizeSpeech, resampleTo } from "../lib/audio.ts";
 
 // Speech-like test shape: an irregular syllable rhythm, so only one lag lines the two series up.
 const shape = (t: number) => Math.max(0, Math.sin(2 * Math.PI * 2.1 * t / 1000) + 0.6 * Math.sin(2 * Math.PI * 3.3 * t / 1000 + 1));
@@ -60,7 +60,7 @@ test("voice present with a motionless mouth is high risk", () => {
 test("resampling: dense input is averaged, sparse input is interpolated", () => {
   assert.deepEqual(Array.from(resample([{ t: 0, v: 0 }, { t: 100, v: 10 }], 0, 6, 20)), [0, 2, 4, 6, 8, 10]);
   assert.deepEqual(Array.from(resample(series(5, 80, t => t < 10 ? 1 : 3, 0), 10, 2, 20)), [2, 3]);
-  assert.equal(voiceThreshold([]), 0.01);
+  assert.equal(voiceThreshold([]), 0.001);
 });
 test("PCM resampling to 16 kHz keeps duration and tone", () => {
   const input = Float32Array.from({ length: 48000 }, (_, i) => Math.sin(2 * Math.PI * 200 * i / 48000));
@@ -69,4 +69,39 @@ test("PCM resampling to 16 kHz keeps duration and tone", () => {
   assert.ok(Math.abs(out[20] - Math.sin(2 * Math.PI * 200 * 61 / 48000)) < 0.02);
   assert.equal(resampleTo(input, 16000), input);
   assert.equal(resampleTo(Float32Array.from([0, 1]), 8000).length, 4);
+});
+
+
+test("quiet speech below the old volume floor is detected with unchanged timing", () => {
+  const quiet = audio(150).map(sample => ({ ...sample, v: sample.v * 0.02 }));
+  assert.ok(Math.max(...quiet.map(sample => sample.v)) < 0.01);
+  const result = crossCorrelate(mouth(), quiet)!;
+  assert.ok(result.voicedFraction > 0.3);
+  assert.ok(Math.abs(result.lagMs - 150) <= 20);
+  assert.equal(syncSignal(result).risk, 15);
+});
+
+test("quiet background fluctuations and digital silence do not count as speech", () => {
+  for (const level of [0, 0.0001, 0.001, 0.004]) {
+    const background = series(10, 6000, t => level * (1 + 0.1 * Math.sin(t)));
+    assert.equal(crossCorrelate(mouth(), background)!.voicedFraction, 0);
+  }
+});
+
+test("transcription gain lifts quiet PCM without changing the source or timing", () => {
+  const pcm = Float32Array.from([0, 0.005, -0.01, 0.002]);
+  const original = pcm.slice();
+  const normalized = normalizeSpeech(pcm);
+  assert.equal(normalized.length, pcm.length);
+  assert.deepEqual(pcm, original);
+  for (let i = 0; i < pcm.length; i++) assert.ok(Math.abs(normalized[i] - pcm[i] * 20) < 1e-7);
+});
+
+test("transcription gain is bounded, avoids clipping, and leaves silence alone", () => {
+  for (const pcm of [new Float32Array(), new Float32Array(160), Float32Array.of(0.00001), Float32Array.of(-0.9, 0.9)]) {
+    assert.equal(normalizeSpeech(pcm), pcm);
+  }
+  const normalized = normalizeSpeech(Float32Array.of(-0.2, 0.1));
+  assert.ok(Math.abs(normalized[0] + 0.8) < 1e-7);
+  assert.ok(Math.abs(normalized[1] - 0.4) < 1e-7);
 });

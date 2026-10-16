@@ -1,5 +1,5 @@
 import type { AudioCapture } from "./audio.ts";
-import { MAX_RECORD_MS } from "./audio.ts";
+import { MAX_RECORD_MS, normalizeSpeech } from "./audio.ts";
 import type { AsrRequest, AsrResponse } from "./asr.worker.ts";
 import { scoreDigits } from "./digits.ts";
 import { crossCorrelate, syncSignal, voiceThreshold } from "./sync.ts";
@@ -105,7 +105,7 @@ export class DigitsCheck {
     if (envelope.length === 0) result = fallback("No audio was captured.");
     else if (measured && measured.voicedFraction < 0.02) { result = { kind: "digits", status: "unavailable", risk: null, heard: "", matched: 0, detail: "No voice was detected, so no digits could be checked. Missing evidence is not a pass." }; }
     else {
-      const text = await this.model.transcribe(pcm);
+      const text = await this.model.transcribe(normalizeSpeech(pcm));
       result = text === null ? fallback("The on-device speech model could not be loaded or did not answer, so the spoken digits were NOT verified.") : scoreDigits(this.expected, text);
     }
     this.model.dispose();
@@ -115,3 +115,4 @@ export class DigitsCheck {
       digitsMatched: typeof result.matched === "number" && result.heard !== undefined ? result.matched : null } };
   }
 }
+
