@@ -1,196 +1,663 @@
+
 import type { RGBSample } from "./rppg.ts";
-import type { DeviceEvidence, FaceMetrics, Point } from "./types.ts";
+import type {
+  DeviceEvidence,
+  FaceMetrics,
+  Point
+} from "./types.ts";
+
+import { extractHeadPose } from "./head-pose.ts";
 
 type Detector = {
-  detectForVideo(video: HTMLVideoElement, timestamp: number): {
+  detectForVideo(
+    video: HTMLVideoElement,
+    timestamp: number
+  ): {
     faceLandmarks: Point[][];
-    faceBlendshapes: { categories: { categoryName: string; score: number }[] }[];
+    faceBlendshapes: {
+      categories: {
+        categoryName: string;
+        score: number;
+      }[];
+    }[];
+    facialTransformationMatrixes: {
+      rows: number;
+      columns: number;
+      data: number[];
+    }[];
   };
   close(): void;
 };
+
 interface Callbacks {
   device: (d: DeviceEvidence) => void;
   metrics: (m: FaceMetrics) => void;
-  model: (status: "loading" | "ready" | "unavailable", message?: string) => void;
+  model: (
+    status: "loading" | "ready" | "unavailable",
+    message?: string
+  ) => void;
   interrupted: (message: string) => void;
 }
+
 export function cameraError(error: unknown): string {
-  const name = error instanceof DOMException || error instanceof Error ? error.name : "";
-  if (name === "NotAllowedError" || name === "SecurityError") return "Camera permission was denied. Open the address-bar site controls, allow Camera, and try again. Check your operating system's camera privacy settings too.";
-  if (name === "NotFoundError") return "No camera was found. Connect a webcam or use the clearly labeled attack lab instead.";
-  if (name === "NotReadableError" || name === "AbortError") return "The camera is busy or unavailable. Close other video apps, then retry.";
-  if (name === "OverconstrainedError") return "This camera could not provide the requested stream. Try another camera or browser.";
-  return error instanceof Error ? error.message : "Camera could not start. Use HTTPS or localhost and open the site directly, not inside a preview frame.";
+  const name =
+    error instanceof DOMException || error instanceof Error
+      ? error.name
+      : "";
+
+  if (name === "NotAllowedError" || name === "SecurityError") {
+    return "Camera permission was denied. Open the address-bar site controls, allow Camera, and try again. Check your operating system's camera privacy settings too.";
+  }
+
+  if (name === "NotFoundError") {
+    return "No camera was found. Connect a webcam or use the clearly labeled attack lab instead.";
+  }
+
+  if (name === "NotReadableError" || name === "AbortError") {
+    return "The camera is busy or unavailable. Close other video apps, then retry.";
+  }
+
+  if (name === "OverconstrainedError") {
+    return "This camera could not provide the requested stream. Try another camera or browser.";
+  }
+
+  return error instanceof Error
+    ? error.message
+    : "Camera could not start. Use HTTPS or localhost and open the site directly, not inside a preview frame.";
 }
 
-/** Owns every camera/model resource. No persistence, uploads, or recording APIs. The microphone lives in lib/audio.ts. */
+/**
+ * Owns webcam, MediaPipe and pulse-sampling resources.
+ * No video frames are persisted or uploaded.
+ * Microphone handling remains in lib/audio.ts.
+ */
 export class BrowserVision {
   private callbacks: Callbacks;
   private cancelled = false;
+
   private stream: MediaStream | null = null;
   private detector: Detector | null = null;
   private video: HTMLVideoElement | null = null;
+
   private raf = 0;
   private frameCallback = 0;
+
   private lastInfer = -Infinity;
   private lastMediaTime = -1;
+
   private firstFrameAt = 0;
   private firstFrameNumber = 0;
   private lastDeviceAt = 0;
+
   private metadata: DeviceEvidence | null = null;
+
+  // rPPG sampling state
   private pulseSamples: RGBSample[] | null = null;
   private pulseCanvas: HTMLCanvasElement | null = null;
   private pulsePoints: Point[] = [];
   private pulseFaceCount = 0;
   private pulseMotion = false;
   private previousNose: Point | null = null;
-  startPulse(): void {
-    this.pulseSamples = [];
-    this.pulseCanvas = document.createElement("canvas");
-    this.pulseCanvas.width = 320; this.pulseCanvas.height = 240;
-    this.previousNose = null;
-  }
-  stopPulse(): RGBSample[] {
-    const samples = this.pulseSamples ?? [];
-    this.pulseSamples = null; this.pulseCanvas = null;
-    this.pulsePoints = []; this.previousNose = null;
-    return samples;
-  }
-  getPulseSamples(): RGBSample[] { return this.pulseSamples ? [...this.pulseSamples] : []; }
-  private samplePulse(t: number): void {
-    const canvas = this.pulseCanvas, video = this.video, points = this.pulsePoints;
-    if (!this.pulseSamples || !canvas || !video || this.pulseFaceCount !== 1 || points.length < 468) return;
-    const ctx = canvas.getContext("2d", { willReadFrequently: true });
-    if (!ctx) return;
-    ctx.drawImage(video, 0, 0, 320, 240);
-    const regions = [
-      { x: (points[109].x + points[338].x) / 2, y: (points[10].y + points[9].y) / 2 },
-      points[50], points[280]
-    ];
-    let r = 0, g = 0, b = 0, count = 0;
-    for (const pt of regions) {
-      const x = Math.max(0, Math.min(306, Math.round(pt.x * 320) - 7));
-      const y = Math.max(0, Math.min(226, Math.round(pt.y * 240) - 7));
-      const pixels = ctx.getImageData(x, y, 14, 14).data;
-      for (let i = 0; i < pixels.length; i += 4) {
-        const rr = pixels[i], gg = pixels[i + 1], bb = pixels[i + 2];
-        if (Math.min(rr, gg, bb) < 12 || Math.max(rr, gg, bb) > 245) continue;
-        r += rr; g += gg; b += bb; count++;
-      }
-    }
-    if (count) this.pulseSamples.push({ t, r: r / count, g: g / count, b: b / count, motion: this.pulseMotion });
-  }
-  constructor(callbacks: Callbacks) { this.callbacks = callbacks; }
-  private interrupt = () => {
-    if (this.cancelled) return;
-    this.stop();
-    this.callbacks.interrupted("The camera stopped or this tab was hidden. The session was cancelled and its evidence discarded. Start a fresh session.");
-  };
-  private onVisibility = () => { if (document.hidden) this.interrupt(); };
-  private onPageHide = () => this.interrupt();
-  async start(video: HTMLVideoElement): Promise<void> {
-    if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) throw new Error("Camera access requires a secure context. Use http://localhost:3000 locally or the HTTPS deployed URL.");
-    this.video = video;
-    document.addEventListener("visibilitychange", this.onVisibility);
-    window.addEventListener("pagehide", this.onPageHide);
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: false,
-      video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 24, max: 30 } },
-    });
-    // Permission dialogs can outlive navigation or cancellation. Close late streams immediately.
-    if (this.cancelled) { stream.getTracks().forEach(t => t.stop()); return; }
-    this.stream = stream;
-    const track = stream.getVideoTracks()[0];
-    track.addEventListener("ended", this.interrupt);
-    const settings = track.getSettings();
-    this.metadata = { label: track.label || "", width: settings.width ?? null, height: settings.height ?? null,
-      declaredFps: settings.frameRate ?? null, observedFps: null };
-    this.callbacks.device({ ...this.metadata });
-    video.srcObject = stream;
-    await video.play();
-    if (this.cancelled) return;
-    this.measureFrames();
-    this.callbacks.model("loading");
-    try {
-      // All assets are same-origin. The package is dynamically imported only after camera consent.
-      const { FaceLandmarker, FilesetResolver } = await import("@mediapipe/tasks-vision");
-      if (this.cancelled) return;
-      const files = await FilesetResolver.forVisionTasks("/mediapipe/wasm");
-      if (this.cancelled) return;
-      const detector = await FaceLandmarker.createFromOptions(files, {
-        baseOptions: { modelAssetPath: "/models/face_landmarker.task", delegate: "CPU" },
-        runningMode: "VIDEO", numFaces: 2, outputFaceBlendshapes: true,
-        minFaceDetectionConfidence: 0.55, minFacePresenceConfidence: 0.55, minTrackingConfidence: 0.55,
-      });
-      if (this.cancelled) { detector.close(); return; }
-      this.detector = detector;
-      this.callbacks.model("ready");
-      this.raf = requestAnimationFrame(this.loop);
-    } catch {
-      if (!this.cancelled) this.callbacks.model("unavailable", "Face landmarks could not load. Run npm run assets, check model/WASM requests, or try a current desktop Chrome browser. No liveness pass is substituted.");
-    }
-  }
-  private measureFrames(): void {
-    const video = this.video;
-    if (!video || typeof video.requestVideoFrameCallback !== "function" || this.cancelled) return;
-    this.frameCallback = video.requestVideoFrameCallback((now, frame) => {
-      if (this.cancelled) return;
-      if (!this.firstFrameAt) { this.firstFrameAt = now; this.firstFrameNumber = frame.presentedFrames; }
-      if (now - this.firstFrameAt > 1500 && now - this.lastDeviceAt > 1000 && this.metadata) {
-        this.metadata.observedFps = Math.round((frame.presentedFrames - this.firstFrameNumber) * 1000 / (now - this.firstFrameAt) * 10) / 10;
-        this.callbacks.device({ ...this.metadata }); this.lastDeviceAt = now;
-      }
-      if (this.pulseSamples) this.samplePulse(now);
-      this.measureFrames();
-    });
-  }
+
+  // Head-pose debugging
+  private lastPoseLog = 0;
+  private debugPose = false;
+
+  // Inference performance
   private fast = false;
   private lastCost = 0;
-  /** Asks for ~20 Hz inference during the digits prompt. Honored only while one inference stays well inside a 50 ms budget. */
-  setFast(fast: boolean): void { this.fast = fast; }
-  private loop = (now: number) => {
-    if (this.cancelled || !this.video || !this.detector) return;
-    if (this.video.readyState >= 2 && now - this.lastInfer >= (this.fast && this.lastCost < 30 ? 50 : 100) && this.video.currentTime !== this.lastMediaTime) {
-      this.lastInfer = now; this.lastMediaTime = this.video.currentTime;
-      try {
-        const started = performance.now();
-        const result = this.detector.detectForVideo(this.video, now);
-        this.lastCost = performance.now() - started;
-        const faceCount = result.faceLandmarks.length;
-        const points = faceCount === 1 ? result.faceLandmarks[0] : [];
-        this.pulseFaceCount = faceCount;
-        this.pulsePoints = points;
-        const nose = points[1];
-        this.pulseMotion = !!(nose && this.previousNose && Math.hypot(nose.x - this.previousNose.x, nose.y - this.previousNose.y) > 0.012);
-        this.previousNose = nose ? { ...nose } : null;
-        const categories = result.faceBlendshapes?.[0]?.categories ?? [];
-        const score = (name: string) => categories.find(c => c.categoryName === name)?.score ?? 0;
-        let yaw = 0, mouthOpen = 0;
-        if (points.length >= 468) {
-          mouthOpen = Math.abs(points[13].y - points[14].y) / Math.max(0.01, Math.abs(points[10].y - points[152].y));
-          const left = points[33], right = points[263], nose = points[1];
-          yaw = -(nose.x - (left.x + right.x) / 2) / Math.max(0.01, Math.abs(right.x - left.x));
+
+  constructor(callbacks: Callbacks) {
+    this.callbacks = callbacks;
+  }
+
+  /**
+   * Begin collecting facial skin-color samples.
+   */
+  startPulse(): void {
+    this.pulseSamples = [];
+
+    this.pulseCanvas = document.createElement("canvas");
+    this.pulseCanvas.width = 320;
+    this.pulseCanvas.height = 240;
+
+    this.previousNose = null;
+    this.pulseMotion = false;
+  }
+
+  /**
+   * Stop collecting pulse samples and return RGB means.
+   */
+  stopPulse(): RGBSample[] {
+    const samples = this.pulseSamples ?? [];
+
+    this.pulseSamples = null;
+    this.pulseCanvas = null;
+    this.pulsePoints = [];
+    this.previousNose = null;
+    this.pulseMotion = false;
+
+    return samples;
+  }
+
+  getPulseSamples(): RGBSample[] {
+    return this.pulseSamples
+      ? [...this.pulseSamples]
+      : [];
+  }
+
+  /**
+   * Sample forehead and cheek RGB values.
+   * The canvas is temporary and never stores video.
+   */
+  private samplePulse(t: number): void {
+    const canvas = this.pulseCanvas;
+    const video = this.video;
+    const points = this.pulsePoints;
+
+    if (
+      !this.pulseSamples ||
+      !canvas ||
+      !video ||
+      this.pulseFaceCount !== 1 ||
+      points.length < 468
+    ) {
+      return;
+    }
+
+    const ctx = canvas.getContext("2d", {
+      willReadFrequently: true
+    });
+
+    if (!ctx) return;
+
+    ctx.drawImage(video, 0, 0, 320, 240);
+
+    const regions = [
+      {
+        x: (points[109].x + points[338].x) / 2,
+        y: (points[10].y + points[9].y) / 2
+      },
+      points[50],
+      points[280]
+    ];
+
+    let r = 0;
+    let g = 0;
+    let b = 0;
+    let count = 0;
+
+    for (const pt of regions) {
+      const x = Math.max(
+        0,
+        Math.min(306, Math.round(pt.x * 320) - 7)
+      );
+
+      const y = Math.max(
+        0,
+        Math.min(226, Math.round(pt.y * 240) - 7)
+      );
+
+      const pixels = ctx.getImageData(
+        x,
+        y,
+        14,
+        14
+      ).data;
+
+      for (let i = 0; i < pixels.length; i += 4) {
+        const rr = pixels[i];
+        const gg = pixels[i + 1];
+        const bb = pixels[i + 2];
+
+        if (
+          Math.min(rr, gg, bb) < 12 ||
+          Math.max(rr, gg, bb) > 245
+        ) {
+          continue;
         }
-        this.callbacks.metrics({ timestamp: now, faceCount, yaw, mouthOpen, points,
-          blinkLeft: score("eyeBlinkLeft"), blinkRight: score("eyeBlinkRight"), jawOpen: score("jawOpen") });
-      } catch {
-        this.callbacks.model("unavailable", "Landmark inference stopped. The affected evidence is unavailable; this session cannot approve.");
-        this.detector.close(); this.detector = null; return;
+
+        r += rr;
+        g += gg;
+        b += bb;
+        count++;
       }
     }
-    this.raf = requestAnimationFrame(this.loop);
+
+    if (count > 0) {
+      this.pulseSamples.push({
+        t,
+        r: r / count,
+        g: g / count,
+        b: b / count,
+        motion: this.pulseMotion
+      });
+    }
+  }
+
+  /**
+   * Cancel verification when camera or tab is interrupted.
+   */
+  private interrupt = (): void => {
+    if (this.cancelled) return;
+
+    this.stop();
+
+    this.callbacks.interrupted(
+      "The camera stopped or this tab was hidden. The session was cancelled and its evidence discarded. Start a fresh session."
+    );
   };
+
+  private onVisibility = (): void => {
+    if (document.hidden) {
+      this.interrupt();
+    }
+  };
+
+  private onPageHide = (): void => {
+    this.interrupt();
+  };
+
+  /**
+   * Request webcam access and initialize MediaPipe.
+   */
+  async start(video: HTMLVideoElement): Promise<void> {
+    if (
+      !window.isSecureContext ||
+      !navigator.mediaDevices?.getUserMedia
+    ) {
+      throw new Error(
+        "Camera access requires a secure context. Use http://localhost:3000 locally or the HTTPS deployed URL."
+      );
+    }
+
+    this.video = video;
+    this.debugPose =
+      new URLSearchParams(window.location.search)
+        .get("debug") === "1";
+
+    document.addEventListener(
+      "visibilitychange",
+      this.onVisibility
+    );
+
+    window.addEventListener(
+      "pagehide",
+      this.onPageHide
+    );
+
+    const stream =
+      await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+          facingMode: "user",
+          width: { ideal: 640 },
+          height: { ideal: 480 },
+          frameRate: { ideal: 24, max: 30 }
+        }
+      });
+
+    if (this.cancelled) {
+      stream.getTracks().forEach(track => track.stop());
+      return;
+    }
+
+    this.stream = stream;
+
+    const track = stream.getVideoTracks()[0];
+
+    track.addEventListener(
+      "ended",
+      this.interrupt
+    );
+
+    const settings = track.getSettings();
+
+    this.metadata = {
+      label: track.label || "",
+      width: settings.width ?? null,
+      height: settings.height ?? null,
+      declaredFps: settings.frameRate ?? null,
+      observedFps: null
+    };
+
+    this.callbacks.device({ ...this.metadata });
+
+    video.srcObject = stream;
+
+    await video.play();
+
+    if (this.cancelled) return;
+
+    this.measureFrames();
+
+    this.callbacks.model("loading");
+
+    try {
+      const {
+        FaceLandmarker,
+        FilesetResolver
+      } = await import("@mediapipe/tasks-vision");
+
+      if (this.cancelled) return;
+
+      const files =
+        await FilesetResolver.forVisionTasks(
+          "/mediapipe/wasm"
+        );
+
+      if (this.cancelled) return;
+
+      const detector =
+        await FaceLandmarker.createFromOptions(files, {
+          baseOptions: {
+            modelAssetPath:
+              "/models/face_landmarker.task",
+            delegate: "CPU"
+          },
+          runningMode: "VIDEO",
+          numFaces: 2,
+          outputFaceBlendshapes: true,
+
+          // Enable 3D head orientation.
+          outputFacialTransformationMatrixes: true,
+
+          minFaceDetectionConfidence: 0.55,
+          minFacePresenceConfidence: 0.55,
+          minTrackingConfidence: 0.55
+        });
+
+      if (this.cancelled) {
+        detector.close();
+        return;
+      }
+
+      this.detector = detector;
+
+      this.callbacks.model("ready");
+
+      this.raf = requestAnimationFrame(
+        this.loop
+      );
+
+    } catch {
+      if (!this.cancelled) {
+        this.callbacks.model(
+          "unavailable",
+          "Face landmarks could not load. Run npm run assets, check model/WASM requests, or try a current desktop Chrome browser."
+        );
+      }
+    }
+  }
+
+  /**
+   * Measure camera frame rate and sample rPPG data.
+   */
+  private measureFrames(): void {
+    const video = this.video;
+
+    if (
+      !video ||
+      typeof video.requestVideoFrameCallback !== "function" ||
+      this.cancelled
+    ) {
+      return;
+    }
+
+    this.frameCallback =
+      video.requestVideoFrameCallback((now, frame) => {
+        if (this.cancelled) return;
+
+        if (!this.firstFrameAt) {
+          this.firstFrameAt = now;
+          this.firstFrameNumber = frame.presentedFrames;
+        }
+
+        if (
+          now - this.firstFrameAt > 1500 &&
+          now - this.lastDeviceAt > 1000 &&
+          this.metadata
+        ) {
+          this.metadata.observedFps =
+            Math.round(
+              (frame.presentedFrames -
+                this.firstFrameNumber) *
+              1000 /
+              (now - this.firstFrameAt) *
+              10
+            ) / 10;
+
+          this.callbacks.device({
+            ...this.metadata
+          });
+
+          this.lastDeviceAt = now;
+        }
+
+        if (this.pulseSamples) {
+          this.samplePulse(now);
+        }
+
+        this.measureFrames();
+      });
+  }
+
+  /**
+   * Request faster inference during digit recognition.
+   */
+  setFast(fast: boolean): void {
+    this.fast = fast;
+  }
+
+  /**
+   * Main MediaPipe processing loop.
+   */
+  private loop = (now: number): void => {
+    if (
+      this.cancelled ||
+      !this.video ||
+      !this.detector
+    ) {
+      return;
+    }
+
+    const interval =
+      this.fast && this.lastCost < 30
+        ? 50
+        : 100;
+
+    if (
+      this.video.readyState >= 2 &&
+      now - this.lastInfer >= interval &&
+      this.video.currentTime !== this.lastMediaTime
+    ) {
+      this.lastInfer = now;
+      this.lastMediaTime = this.video.currentTime;
+
+      try {
+        const started = performance.now();
+
+        const result =
+          this.detector.detectForVideo(
+            this.video,
+            now
+          );
+
+        this.lastCost =
+          performance.now() - started;
+
+        const faceCount =
+          result.faceLandmarks.length;
+
+        const points =
+          faceCount === 1
+            ? result.faceLandmarks[0]
+            : [];
+
+        // Preserve pulse sampling.
+        this.pulseFaceCount = faceCount;
+        this.pulsePoints = points;
+
+        const nose = points[1];
+
+        this.pulseMotion = Boolean(
+          nose &&
+          this.previousNose &&
+          Math.hypot(
+            nose.x - this.previousNose.x,
+            nose.y - this.previousNose.y
+          ) > 0.012
+        );
+
+        this.previousNose =
+          nose ? { ...nose } : null;
+
+        // Facial expression scores.
+        const categories =
+          result.faceBlendshapes?.[0]?.categories ?? [];
+
+        const score = (name: string) =>
+          categories.find(
+            category =>
+              category.categoryName === name
+          )?.score ?? 0;
+
+        let yaw = 0;
+        let mouthOpen = 0;
+
+        if (points.length >= 468) {
+          mouthOpen =
+            Math.abs(
+              points[13].y - points[14].y
+            ) /
+            Math.max(
+              0.01,
+              Math.abs(
+                points[10].y - points[152].y
+              )
+            );
+
+          const left = points[33];
+          const right = points[263];
+          const nosePoint = points[1];
+
+          // Existing nose-offset heuristic.
+          yaw =
+            -(
+              nosePoint.x -
+              (left.x + right.x) / 2
+            ) /
+            Math.max(
+              0.01,
+              Math.abs(right.x - left.x)
+            );
+        }
+
+        // New 3D head-pose extraction.
+        const matrix =
+          result.facialTransformationMatrixes?.[0]?.data;
+
+        const pose =
+          faceCount === 1 && matrix
+            ? extractHeadPose(matrix)
+            : null;
+
+        // Debug logs only when ?debug=1.
+        if (
+          pose &&
+          this.debugPose &&
+          now - this.lastPoseLog > 500
+        ) {
+          this.lastPoseLog = now;
+
+          console.log("HEAD POSE:", {
+            yaw: pose.yawDeg.toFixed(1),
+            pitch: pose.pitchDeg.toFixed(1),
+            roll: pose.rollDeg.toFixed(1)
+          });
+        }
+
+        // Publish measurements.
+        this.callbacks.metrics({
+          timestamp: now,
+          faceCount,
+          yaw,
+          yawDeg: pose?.yawDeg,
+          pitchDeg: pose?.pitchDeg,
+          rollDeg: pose?.rollDeg,
+          mouthOpen,
+          points,
+          blinkLeft: score("eyeBlinkLeft"),
+          blinkRight: score("eyeBlinkRight"),
+          jawOpen: score("jawOpen")
+        });
+
+      } catch {
+        this.callbacks.model(
+          "unavailable",
+          "Landmark inference stopped. The affected evidence is unavailable."
+        );
+
+        this.detector?.close();
+        this.detector = null;
+        return;
+      }
+    }
+
+    this.raf = requestAnimationFrame(
+      this.loop
+    );
+  };
+
+  /**
+   * Release webcam and model resources.
+   */
   stop(): void {
     this.cancelled = true;
+
     cancelAnimationFrame(this.raf);
-    if (this.frameCallback && this.video?.cancelVideoFrameCallback) this.video.cancelVideoFrameCallback(this.frameCallback);
-    document.removeEventListener("visibilitychange", this.onVisibility);
-    window.removeEventListener("pagehide", this.onPageHide);
-    this.stream?.getTracks().forEach(t => { t.removeEventListener("ended", this.interrupt); t.stop(); });
+
+    if (
+      this.frameCallback &&
+      this.video?.cancelVideoFrameCallback
+    ) {
+      this.video.cancelVideoFrameCallback(
+        this.frameCallback
+      );
+    }
+
+    document.removeEventListener(
+      "visibilitychange",
+      this.onVisibility
+    );
+
+    window.removeEventListener(
+      "pagehide",
+      this.onPageHide
+    );
+
+    this.stream?.getTracks().forEach(track => {
+      track.removeEventListener(
+        "ended",
+        this.interrupt
+      );
+      track.stop();
+    });
+
     this.stream = null;
-    if (this.video) { this.video.pause(); this.video.srcObject = null; }
+
+    if (this.video) {
+      this.video.pause();
+      this.video.srcObject = null;
+    }
+
     this.video = null;
-    this.detector?.close(); this.detector = null;
-    this.metadata = null; this.stopPulse();
+
+    this.detector?.close();
+    this.detector = null;
+
+    this.metadata = null;
+
+    this.stopPulse();
   }
 }
