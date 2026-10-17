@@ -12,7 +12,7 @@ function productionWorkerUrl() {
     if (!source.includes("Loading speech model")) continue;
     const match = source.match(/default\("(static\/chunks\/turbopack-worker-[^"]+)",(\[[^\]]+\])\)/);
     if (!match) continue;
-    const urls = (JSON.parse(match[2]) as string[]).map(path => `/_next/${path}`).reverse();
+    const urls = (JSON.parse(match[2]) as string[]).map(path => `/_next/${path}`);
     return `/_next/${match[1]}#params=${encodeURIComponent(JSON.stringify([urls, "", "", "", ""]))}`;
   }
   throw new Error("Cannot locate the production speech worker; update the test harness for this bundler output.");
