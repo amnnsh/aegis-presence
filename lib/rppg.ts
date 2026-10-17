@@ -47,7 +47,7 @@ const WINDOW_SECONDS = 1.6;
 const SNR_CONFIDENT_DB = 5;
 const SNR_MARGINAL_DB = 1;
 const GREEN_VARIANCE_FLOOR = 0.00048;
-const AMPLITUDE_FLOOR = 0.00075;
+const AMPLITUDE_FLOOR = 0.00005;
 const SPECTRAL_PURITY_MIN = 0.35;
 const SPECTRAL_PURITY_CONFIDENT = 0.50;
 const IBI_REGULARITY_MIN = 0.52;
@@ -426,6 +426,38 @@ function interBeatRegularity(pulse: number[], fps: number): number {
   return consistent / intervals.length;
 }
 
+/**
+ * Reject broad brightness flicker when using the single-channel fallback.
+ * A lamp changes normalized R, G and B together; blood-volume absorption
+ * changes green more strongly. This is supporting evidence, not proof of life.
+ */
+function chromaticFraction(samples: RGBSample[], bpm: number): number {
+  const uniform = resample(samples);
+  if (uniform.length < 2) return 0;
+  const frequency = bpm / 60;
+  const projection = (channel: "r" | "g" | "b"): [number, number] => {
+    const average = mean(uniform.map(sample => sample[channel]));
+    const filtered = bandpassCardiac(
+      uniform.map(sample => sample[channel] / Math.max(1e-9, average)),
+      SAMPLE_RATE
+    );
+    let real = 0;
+    let imaginary = 0;
+    for (let i = 0; i < filtered.length; i++) {
+      const angle = 2 * Math.PI * frequency * i / SAMPLE_RATE;
+      real += filtered[i] * Math.cos(angle);
+      imaginary -= filtered[i] * Math.sin(angle);
+    }
+    return [real, imaginary];
+  };
+  const [rr, ri] = projection("r");
+  const [gr, gi] = projection("g");
+  const [br, bi] = projection("b");
+  const greenAmplitude = Math.hypot(gr, gi);
+  if (greenAmplitude < 1e-9) return 0;
+  return Math.hypot(gr - (rr + br) / 2, gi - (ri + bi) / 2) / greenAmplitude;
+}
+
 function evaluateGreenFallback(
   valid: RGBSample[],
   quality: PulseQuality
@@ -466,6 +498,11 @@ function evaluateGreenFallback(
   if (regularity < IBI_REGULARITY_MIN) return null;
 
   const { bpm, snrDb, spectralPurity } = frequency;
+  // The reference webcam detector uses a forehead green trace, temporal
+  // interpolation and a windowed spectrum. Guard this fallback against a
+  // synchronized lighting oscillation on a still image.
+  // https://github.com/advithya/webcam-pulse-detector (Apache-2.0)
+  if (chromaticFraction(valid, bpm) < 0.15) return null;
   const risk =
     snrDb >= SNR_CONFIDENT_DB &&
     spectralPurity >= SPECTRAL_PURITY_CONFIDENT &&
@@ -536,7 +573,7 @@ function evaluateSegment(
   const greenVar = greenChannelVariance(valid);
   if (greenVar < GREEN_VARIANCE_FLOOR) {
     return greenFallback(
-      "Skin color variance too low — no physiological fluctuation detected. A live face is required."
+      "No measurable skin-color rhythm was found. Improve front-facing light and retry."
     );
   }
 
@@ -545,7 +582,7 @@ function evaluateSegment(
   const pulseAmplitude = std(pulse);
   if (pulseAmplitude < AMPLITUDE_FLOOR) {
     return greenFallback(
-      "Pulse signal amplitude too weak — consistent with a static image. A live face is required."
+      "Pulse signal is too weak to measure reliably. Improve front-facing light, hold still, and retry."
     );
   }
 
