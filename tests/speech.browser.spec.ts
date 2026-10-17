@@ -9,7 +9,7 @@ function productionWorkerUrl() {
   const chunks = resolve("out/_next/static/chunks");
   for (const name of readdirSync(chunks).filter(name => name.endsWith(".js"))) {
     const source = readFileSync(resolve(chunks, name), "utf8");
-    if (!source.includes("Loading speech model")) continue;
+    if (!source.includes("The speech worker could not start.")) continue;
     const match = source.match(/default\("(static\/chunks\/turbopack-worker-[^"]+)",(\[[^\]]+\])\)/);
     if (!match) continue;
     // Match Turbopack's worker constructor: runtime first, plus the chunk base
@@ -20,7 +20,11 @@ function productionWorkerUrl() {
   throw new Error("Cannot locate the production speech worker; update the test harness for this bundler output.");
 }
 
-test("quiet speech passes through microphone capture and the real speech worker", async ({ page }, testInfo) => {
+for (const scenario of [
+  { name: "normal speech", peak: 0.3, heard: "1234" },
+  { name: "quiet speech", peak: 0.008, heard: "1234" },
+  { name: "silence", peak: 0, heard: "" },
+]) test(`${scenario.name} passes through microphone capture and the real speech worker`, async ({ page }, testInfo) => {
   test.setTimeout(120_000);
   if (testInfo.project.name === "mobile-chromium") test.skip(); // same Chromium worker; avoid loading Whisper twice in parallel
   await page.addInitScript(() => {
@@ -53,7 +57,7 @@ test("quiet speech passes through microphone capture and the real speech worker"
   await page.route("**/__speech-test__/digits.wav", route => route.fulfill({ contentType: "audio/wav", body: readFileSync(resolve("tests/fixtures/one-two-three-four.wav")) }));
   await page.goto("/verify/");
   await page.getByRole("heading", { level: 1 }).click(); // real user activation for Web Audio
-  const outcome = await page.evaluate(async () => {
+  const outcome = await page.evaluate(async targetPeak => {
     // Dynamic paths keep these test-only modules out of the application bundle.
     const base = "/__speech-test__/lib/";
     const { AudioCapture } = await import(base + "audio.ts");
@@ -64,7 +68,7 @@ test("quiet speech passes through microphone capture and the real speech worker"
     const samples = buffer.getChannelData(0);
     let peak = 0;
     for (const sample of samples) peak = Math.max(peak, Math.abs(sample));
-    for (let i = 0; i < samples.length; i++) samples[i] *= 0.008 / peak;
+    for (let i = 0; i < samples.length; i++) samples[i] *= targetPeak / peak;
     const source = context.createBufferSource();
     source.buffer = buffer;
     const destination = context.createMediaStreamDestination();
@@ -88,10 +92,15 @@ test("quiet speech passes through microphone capture and the real speech worker"
       navigator.mediaDevices.getUserMedia = original;
       await context.close();
     }
-  });
+  }, scenario.peak);
   expect(outcome.recordedMs).toBeGreaterThan(2000);
-  expect(outcome.peakLevel).toBeGreaterThan(0);
-  expect(outcome.peakLevel).toBeLessThan(0.01);
-  expect(outcome.result.heard, `${outcome.result.detail}; worker events: ${JSON.stringify(outcome.workerEvents)}`).toBe("1234");
-  expect(outcome.result.matched).toBe(4);
+  if (scenario.peak > 0) {
+    expect(outcome.peakLevel).toBeGreaterThan(0);
+    expect(outcome.peakLevel).toBeLessThan(scenario.peak);
+  } else {
+    expect(outcome.peakLevel).toBe(0);
+    expect(outcome.result.status).toBe("unavailable");
+  }
+  expect(outcome.result.heard, `${outcome.result.detail}; worker events: ${JSON.stringify(outcome.workerEvents)}`).toBe(scenario.heard);
+  expect(outcome.result.matched).toBe(scenario.heard.length);
 });

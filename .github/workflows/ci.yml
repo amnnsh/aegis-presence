@@ -29,6 +29,12 @@ jobs:
         run: npm run check
       - name: Install browser test runtime
         run: npx playwright install --with-deps chromium firefox
+      - name: Provide an audio device for headless Firefox
+        run: |
+          sudo apt-get install -y pulseaudio
+          pulseaudio --start --exit-idle-time=-1
+          pactl load-module module-null-sink sink_name=ci_audio
+          pactl set-default-sink ci_audio
       - name: Check static export and speech capture in Chromium and Firefox
         run: npm run test:browser
   backend:

@@ -86,7 +86,7 @@ export class DigitsCheck {
     return voiced.length < 5 ? null : { first: voiced[0].t, last: voiced[voiced.length - 1].t, now: envelope[envelope.length - 1].t };
   }
   get progress(): string {
-    const loading = this.model.state === "loading" ? ` Loading speech model... ${this.model.percent}%` : "";
+    const loading = this.model.state === "loading" ? ` Recording now; speech model loading (${this.model.percent}%).` : "";
     if (this.model.state === "failed") return "Speech recognition is unavailable. You can skip this challenge and try again.";
     const recent = this.audio.envelope.slice(-20);
     const level = recent.reduce((sum, sample) => sum + sample.v, 0) / Math.max(1, recent.length);
