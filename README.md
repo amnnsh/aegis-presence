@@ -226,4 +226,5 @@ Built as a hackathon prototype. See the repository's commit history for contribu
 
 ### Experimental pulse stage
 
-After gestures, the browser offers a 12-second on-device rPPG stage with a skip option, a waveform and an estimated BPM. The estimate comes from forehead and cheek RGB means; raw frames are not retained. Signal quality and risk thresholds are exploratory and **not** evidence of genuine presence or medical pulse accuracy. Team validation with real cameras and replay attacks is pending.
+After gestures, the browser offers a 35-second on-device rPPG stage with a skip or restart option, a waveform and an estimated BPM. Before the challenges, choose a connected camera from the local selector if you want to test another webcam. During pulse capture, outlined forehead and cheek boxes show the sampled skin areas; the panel reports each patch's mean green value and usable pixel percentage. Supported webcams hold exposure and white balance during capture. The estimate comes from forehead and cheek RGB means; raw frames are not retained. Signal quality and risk thresholds are exploratory and **not** evidence of genuine presence or medical pulse accuracy. Team validation with real cameras and replay attacks is pending.
+
