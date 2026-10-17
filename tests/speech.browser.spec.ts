@@ -28,11 +28,11 @@ test("quiet speech passes through microphone capture and the real speech worker"
       constructor(...args: ConstructorParameters<typeof Worker>) {
         super(...args);
         this.addEventListener("message", event => {
-          const events = (window as Window & { __aegisWorkerEvents: unknown[] }).__aegisWorkerEvents;
-          events.push({ type: "message", data: event.data });
-          if (events.length > 30) events.shift();
+          const events = (window as Window & { __aegisWorkerEvents?: unknown[] }).__aegisWorkerEvents;
+          events?.push({ type: "message", data: event.data });
+          if (events && events.length > 30) events.shift();
         });
-        this.addEventListener("error", event => (window as Window & { __aegisWorkerEvents: unknown[] }).__aegisWorkerEvents.push({ type: "error", message: event.message, filename: event.filename }));
+        this.addEventListener("error", event => (window as Window & { __aegisWorkerEvents?: unknown[] }).__aegisWorkerEvents?.push({ type: "error", message: event.message, filename: event.filename }));
       }
     };
   });
@@ -78,7 +78,7 @@ test("quiet speech passes through microphone capture and the real speech worker"
       const recordedMs = capture.recordedMs;
       const peakLevel = Math.max(...capture.envelope.map((sample: { v: number }) => sample.v));
       const result = await check.finish();
-      const workerEvents = (window as Window & { __aegisWorkerEvents: unknown[] }).__aegisWorkerEvents;
+      const workerEvents = (window as Window & { __aegisWorkerEvents?: unknown[] }).__aegisWorkerEvents ?? [];
       return { result: result.result, recordedMs, peakLevel, workerEvents };
     } finally {
       capture.stop();
