@@ -153,22 +153,22 @@ def test_complete_recomputes_server_side_and_signs(client, session, sql):
     response = client.post(f"/api/sessions/{session['session_id']}/complete", json=body)
     assert response.status_code == 200
     result = response.json()
-    # 12 * (20 + 30 + 15) / 100 + 60 * 35 / 100; simulated and client-claimed "server" inputs are excluded.
-    assert (result["decision"], result["risk"], result["coverage"]) == ("step-up", 29, 65)
+    # 12 * (15 + 30 + 10) / 100 + 60 * 45 / 100; simulated, client-claimed "server" and missing texture inputs are excluded.
+    assert (result["decision"], result["risk"], result["coverage"]) == ("step-up", 34, 55)
     assert result["policy_version"] == POLICY_VERSION and result["mode"] == "live"
     freshness = result["signals"][-1]
     assert (freshness["id"], freshness["risk"], freshness["provenance"]) == ("freshness", 10, "server")
     assert [s["id"] for s in result["signals"][:-1]] == list(SIGNAL_IDS)
     assert any(reason.startswith("Freshness (server-checked): clean") for reason in result["reasons"])
     assert sql("SELECT status, decision, risk, coverage, policy_version FROM sessions") == \
-        [("completed", "step-up", 29, 65, POLICY_VERSION)]
+        [("completed", "step-up", 34, 55, POLICY_VERSION)]
 
     jwk = client.get("/api/keys").json()["keys"][0]
     assert (jwk["kty"], jwk["crv"], jwk["alg"]) == ("OKP", "Ed25519", "EdDSA")
     public = Ed25519PublicKey.from_public_bytes(base64.urlsafe_b64decode(jwk["x"] + "=" * (-len(jwk["x"]) % 4)))
     claims = jwt.decode(result["token"], public, algorithms=["EdDSA"])
     assert claims["sub"] == session["session_id"] and claims["exp"] == claims["iat"] + 600
-    assert (claims["decision"], claims["risk"], claims["policy_version"]) == ("step-up", 29, POLICY_VERSION)
+    assert (claims["decision"], claims["risk"], claims["policy_version"]) == ("step-up", 34, POLICY_VERSION)
     assert jwt.get_unverified_header(result["token"])["kid"] == jwk["kid"]
 
     assert client.post("/api/tokens/verify", json={"token": result["token"]}).json() == {"valid": True, "claims": claims}

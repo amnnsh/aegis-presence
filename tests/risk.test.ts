@@ -27,7 +27,7 @@ test("simulated clean evidence never approves a live user", () => {
 });
 test("all low observed scores still cannot approve in the prototype", () => assert.equal(evaluateRisk(observed(0), "live").decision, "step-up"));
 test("invalid, missing, duplicate, and non-finite scores cost 60", () => {
-  const rows = observed(0); rows[0].risk = NaN; rows[1].risk = -1; rows[2].risk = 101; rows[3].risk = Infinity; rows.push({ ...rows[4] });
+  const rows = observed(0); rows[0].risk = NaN; rows[1].risk = -1; rows[2].risk = 101; rows[3].risk = Infinity; rows[5].risk = null; rows.push({ ...rows[4] });
   const result = evaluateRisk(rows, "live");
   assert.equal(result.risk, 60); assert.equal(result.coverage, 0); assert.equal(result.decision, "step-up");
 });

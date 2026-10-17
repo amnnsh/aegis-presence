@@ -41,6 +41,17 @@ It is an ONNX conversion of OpenAI's `whisper-tiny.en`, whose model card lists A
 
 The model and runtime are generated locally, ignored by Git, and served from the site's own origin. The browser never contacts a model hub, and no audio leaves the device.
 
+## Silent-Face anti-spoofing models
+
+The experimental screen/print texture check uses two MiniFASNet models from Silent-Face-Anti-Spoofing by Minivision (Apache-2.0, https://github.com/minivision-ai/Silent-Face-Anti-Spoofing). The upstream `.pth` weights were converted to ONNX (opset 17) with a softmax head appended, so the output `probs` is already a probability over three classes (index 1 = real face). The files are committed under `public/models/silent-face/`, served from the site's own origin, and run in the browser with ONNX Runtime Web (the copy installed with Transformers.js; see above).
+
+```
+419a87691b4d94134b5939f39830b6e2c20b47e82a54c8933ddeea009284d6c9  2.7_80x80_MiniFASNetV2.onnx
+47d79e29d61e509b9f46aafff6ae96922701625eba76c2219999a17fb49fec13  4_0_0_80x80_MiniFASNetV1SE.onnx
+```
+
+These SHA-256 values identify the converted files in this repository; they are not upstream-published digests. The models were trained on upstream's data and capture setup, not on this app's cameras, and this project has not validated their accuracy.
+
 ## Graphics, fonts, and sample data
 
 The interface uses original CSS/SVG graphics and system fonts; no third-party portrait, attack recording, brand asset, font file, or real identity document is bundled. All dashboard attempts and attack scores are fictional. External problem statistics are attributed in the README and linked from the landing page; they are not product-performance claims.

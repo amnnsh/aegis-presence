@@ -1,11 +1,12 @@
 import type { Decision, DecisionResult, Signal, SignalId } from "./types.ts";
 
 export const SIGNALS: { id: SignalId; title: string; weight: number; short: string }[] = [
-  { id: "injection", title: "Camera integrity", weight: 20, short: "Device metadata" },
+  { id: "injection", title: "Camera integrity", weight: 15, short: "Device metadata" },
   { id: "liveness", title: "Active liveness", weight: 30, short: "Random gestures" },
-  { id: "reflection", title: "Light response", weight: 15, short: "Screen / face response" },
-  { id: "pulse", title: "Pulse signal (rPPG)", weight: 20, short: "Skin-color pulse" },
+  { id: "reflection", title: "Light response", weight: 10, short: "Screen / face response" },
+  { id: "pulse", title: "Pulse signal (rPPG)", weight: 15, short: "Skin-color pulse" },
   { id: "sync", title: "Audio-visual sync", weight: 15, short: "Lip / voice timing" },
+  { id: "texture", title: "Screen/print texture", weight: 15, short: "Texture CNN" },
 ];
 export const POLICY = { stepUp: 30, reject: 65, unknownRisk: 60, injectionVeto: 70 } as const;
 

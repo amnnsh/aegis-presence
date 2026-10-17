@@ -6,18 +6,19 @@ from __future__ import annotations
 
 import math
 
-POLICY_VERSION = "0.2.0"
+POLICY_VERSION = "0.3.0"
 
 # Signal ids live here only: renaming one (e.g. "pulse" -> "pulse") is a single edit.
-INJECTION, LIVENESS, REFLECTION, PULSE, SYNC = SIGNAL_IDS = ("injection", "liveness", "reflection", "pulse", "sync")
+INJECTION, LIVENESS, REFLECTION, PULSE, SYNC, TEXTURE = SIGNAL_IDS = ("injection", "liveness", "reflection", "pulse", "sync", "texture")
 FRESHNESS = "freshness"
 
 SIGNALS: tuple[dict, ...] = (
-    {"id": INJECTION, "title": "Camera integrity", "weight": 20},
+    {"id": INJECTION, "title": "Camera integrity", "weight": 15},
     {"id": LIVENESS, "title": "Active liveness", "weight": 30},
-    {"id": REFLECTION, "title": "Light response", "weight": 15},
-    {"id": PULSE, "title": "Pulse signal (rPPG)", "weight": 20},
+    {"id": REFLECTION, "title": "Light response", "weight": 10},
+    {"id": PULSE, "title": "Pulse signal (rPPG)", "weight": 15},
     {"id": SYNC, "title": "Audio-visual sync", "weight": 15},
+    {"id": TEXTURE, "title": "Screen/print texture", "weight": 15},
 )
 POLICY = {"stepUp": 30, "reject": 65, "unknownRisk": 60, "injectionVeto": 70, "freshnessVeto": 70, "freshnessFlag": 50}
 PROVENANCES = ("observed", "heuristic", "server", "simulated", "unavailable")

@@ -57,7 +57,7 @@ function ServerLine({ result }: { result: DecisionResult }) {
     <p className="microcopy">{check.freshness.detail}</p>
     {check.token && <details><summary>Signed result token (EdDSA, valid 10 minutes)</summary><code className="mono token-box">{check.token}</code><p className="microcopy">The server recomputed this decision from the reported scores and signed it. Check it with POST /api/tokens/verify or the public key at /api/keys. The inputs still come from this browser.</p></details>}</div>;
 }
-export const signalIcons: IconName[] = ["camera", "eye", "sun", "scan", "audio"];
+export const signalIcons: IconName[] = ["camera", "eye", "sun", "scan", "audio", "search"];
 export function ResultView({ result, onReset, sessionLabel, compact = false }: { result: DecisionResult; onReset?: () => void; sessionLabel?: string; compact?: boolean }) {
   const title = result.decision === "approve" ? "Low-risk demo outcome" : result.decision === "reject" ? "Do not continue this attempt" : "One more layer is needed";
   return <section className={`result-view ${compact ? "result-compact" : ""}`} aria-label="Verification result">
