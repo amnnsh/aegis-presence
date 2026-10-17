@@ -1,4 +1,4 @@
-import type { Challenge, ChallengeResult, ClientEvent, Decision, DecisionResult, EventType, HeadMove, Plan, Signal } from "./types.ts";
+﻿import type { Challenge, ChallengeResult, ClientEvent, Decision, DecisionResult, EventType, HeadMove, Plan, Signal } from "./types.ts";
 import { SIGNALS } from "./risk.ts";
 import { epochNow } from "./challenges.ts";
 
