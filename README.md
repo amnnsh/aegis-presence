@@ -29,6 +29,7 @@ A convincing face on a screen is not proof that a real person is present. Replay
 | 👁️ Active liveness | A random three-move head sequence (left / right / up / down, one arrow at a time), blinks that must answer randomly timed ring cues within 150-1500 ms, and a four-digit prompt. Prompts advance automatically, and cue / response timings are logged for the server. With the optional microphone, an on-device speech model (Whisper tiny) checks the spoken digits | Checks the words, not the speaker. Without the microphone it is mouth motion only. Does not certify liveness |
 | 🌈 Screen-light response | Optional six-step color stimulus and cheek-color sampling | Experimental; affected by lighting, exposure, and movement |
 | 💓 Pulse signal (rPPG) | Experimental on-device skin-color pulse estimate | Unvalidated; not proof of liveness or medical heart rate |
+| 🖼️ Screen/print texture | During the pulse window, about two face crops per second go through two Silent-Face MiniFASNet CNNs (ONNX Runtime Web, on-device); the median real-face score sets the risk | Experimental and **not validated** on this app's cameras; thresholds are starting points |
 | 🔊 Audio-visual sync | With the optional microphone, correlates mouth opening with loudness during the digits prompt, on-device | Untuned correlation heuristic, **not** a lip-sync model. Unavailable (never simulated) without the microphone |
 | ⚖️ Explainable risk | Weighted local score, provenance, missing-evidence handling | Illustrative policy, **not** a fraud probability |
 | 🧪 Attack lab | Four fixed scenarios demonstrating approve / step-up / reject | Fictional fixtures, **not** measured detection results |
@@ -68,14 +69,15 @@ The site is a **static Next.js application**. The model and MediaPipe WASM asset
 
 ## 🧠 Risk scoring — transparent by design
 
-Aegis combines five inputs using fixed weights:
+Aegis combines six inputs using fixed weights:
 
 | Signal | Weight |
 | --- | ---: |
 | Active liveness | 30% |
-| Camera integrity | 20% |
-| Pulse signal (rPPG) | 20% |
-| Screen-light response | 15% |
+| Camera integrity | 15% |
+| Pulse signal (rPPG) | 15% |
+| Screen/print texture | 15% |
+| Screen-light response | 10% |
 | Audio-visual synchronization | 15% |
 
 `risk = Σ(weight × usedRisk / 100)`
@@ -227,3 +229,5 @@ Built as a hackathon prototype. See the repository's commit history for contribu
 ### Experimental pulse stage
 
 After gestures, the browser offers a 12-second on-device rPPG stage with a skip option, a waveform and an estimated BPM. The estimate comes from forehead and cheek RGB means; raw frames are not retained. Signal quality and risk thresholds are exploratory and **not** evidence of genuine presence or medical pulse accuracy. Team validation with real cameras and replay attacks is pending.
+
+During the same window, `lib/texture.ts` scores about one frame every 500 ms with the two Silent-Face anti-spoofing models in `public/models/silent-face/` (crop and input format ported from upstream: landmark box scaled 2.7x and 4.0x, 80x80, BGR, raw 0..255). With at least six scores, a median real-face probability of 0.70 or more maps to risk 15, 0.40 or more to 45, and anything lower to 80; fewer scores leave the signal unavailable (60 at its weight). Crops stay in an in-memory canvas and are never stored or uploaded. Open `/verify/?debug=1` to see the live median in the debug readout and the per-frame scores in the console.

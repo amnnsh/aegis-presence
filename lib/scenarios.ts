@@ -3,14 +3,14 @@ import { evaluateRisk, SIGNALS } from "./risk.ts";
 
 // SIMULATED: curated examples, not recordings, measurements, detections, or benchmarks.
 export const SCENARIOS: { id: ScenarioId; title: string; description: string; scores: number[]; details: string[] }[] = [
-  { id: "normal", title: "Normal user", description: "Consistent signals across all layers.", scores: [8, 5, 9, 7, 5],
-    details: ["Fixture: ordinary camera metadata.", "Fixture: requested gestures match.", "Fixture: plausible light response.", "Simulated physiological pulse fixture; not a measurement.", "Simulated physiological pulse fixture; not a measurement."] },
-  { id: "replay", title: "Replayed video", description: "A recording cannot follow this session.", scores: [35, 94, 88, 62, 82],
-    details: ["Fixture: unusual frame cadence.", "Fixture: random challenges not followed.", "Fixture: no timely color response.", "Fixture: weak physiological pulse evidence.", "Simulated timing mismatch; real model in the full build."] },
-  { id: "virtual", title: "Virtual-camera feed", description: "Ambiguous device evidence needs review.", scores: [82, 12, 24, 24, 16],
-    details: ["Fixture: a virtual-camera label. Legitimate virtual cameras exist.", "Fixture: gestures appear responsive.", "Fixture: modest color response.", "Simulated physiological pulse fixture; not a measurement.", "Simulated physiological pulse fixture; not a measurement."] },
-  { id: "deepfake", title: "Deepfake sample", description: "Fictional signals illustrate risk policy.", scores: [24, 62, 70, 95, 93],
-    details: ["Fixture: metadata appears ordinary.", "Fixture: inconsistent facial motion.", "Fixture: weak challenge response.", "Fixture: poor physiological pulse evidence.", "Simulated lip/audio mismatch; real model in the full build."] },
+  { id: "normal", title: "Normal user", description: "Consistent signals across all layers.", scores: [8, 5, 9, 7, 5, 6],
+    details: ["Fixture: ordinary camera metadata.", "Fixture: requested gestures match.", "Fixture: plausible light response.", "Simulated physiological pulse fixture; not a measurement.", "Simulated physiological pulse fixture; not a measurement.", "Fixture: no screen or print texture."] },
+  { id: "replay", title: "Replayed video", description: "A recording cannot follow this session.", scores: [35, 94, 88, 62, 82, 78],
+    details: ["Fixture: unusual frame cadence.", "Fixture: random challenges not followed.", "Fixture: no timely color response.", "Fixture: weak physiological pulse evidence.", "Simulated timing mismatch; real model in the full build.", "Fixture: screen-like texture around the face."] },
+  { id: "virtual", title: "Virtual-camera feed", description: "Ambiguous device evidence needs review.", scores: [82, 12, 24, 24, 16, 40],
+    details: ["Fixture: a virtual-camera label. Legitimate virtual cameras exist.", "Fixture: gestures appear responsive.", "Fixture: modest color response.", "Simulated physiological pulse fixture; not a measurement.", "Simulated physiological pulse fixture; not a measurement.", "Fixture: ambiguous texture score."] },
+  { id: "deepfake", title: "Deepfake sample", description: "Fictional signals illustrate risk policy.", scores: [24, 62, 70, 95, 93, 58],
+    details: ["Fixture: metadata appears ordinary.", "Fixture: inconsistent facial motion.", "Fixture: weak challenge response.", "Fixture: poor physiological pulse evidence.", "Simulated lip/audio mismatch; real model in the full build.", "Fixture: ambiguous texture score."] },
 ];
 export function scenarioResult(id: ScenarioId) {
   const scenario = SCENARIOS.find(s => s.id === id)!;

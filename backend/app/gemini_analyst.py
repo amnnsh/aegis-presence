@@ -39,6 +39,7 @@ ALLOWED_SIGNALS = {
     "reflection",
     "pulse",
     "sync",
+    "texture",
 }
 
 ALLOWED_PROVENANCE = {

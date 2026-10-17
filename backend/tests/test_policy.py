@@ -3,12 +3,12 @@ import pytest
 
 from app.policy import SIGNAL_IDS, SIGNALS, apply_freshness, evaluate_risk
 
-# Scores are in SIGNAL_IDS order: injection, liveness, reflection, pulse, sync.
+# Scores are in SIGNAL_IDS order: injection, liveness, reflection, pulse, sync, texture.
 ATTACK_LAB = [
-    ("normal", [8, 5, 9, 7, 5], 7, "approve"),
-    ("replay", [35, 94, 88, 62, 82], 73, "reject"),
-    ("virtual", [82, 12, 24, 24, 16], 31, "step-up"),
-    ("deepfake", [24, 62, 70, 95, 93], 67, "reject"),
+    ("normal", [8, 5, 9, 7, 5, 6], 6, "approve"),
+    ("replay", [35, 94, 88, 62, 82, 78], 76, "reject"),
+    ("virtual", [82, 12, 24, 24, 16, 40], 30, "step-up"),
+    ("deepfake", [24, 62, 70, 95, 93, 58], 66, "reject"),
 ]
 
 
@@ -18,7 +18,7 @@ def rows(scores, provenance="simulated"):
 
 
 def heuristic(score):
-    return rows([score] * 5, "heuristic")
+    return rows([score] * len(SIGNAL_IDS), "heuristic")
 
 
 def test_weights_sum_to_100():
@@ -35,7 +35,7 @@ def test_attack_lab_fixtures_match_typescript(name, scores, risk, decision):
 
 
 def test_virtual_fixture_reasons_match_typescript_text():
-    result = evaluate_risk(rows([82, 12, 24, 24, 16]), "simulation")
+    result = evaluate_risk(rows([82, 12, 24, 24, 16, 40]), "simulation")
     assert result["reasons"] == [
         "Every input in this attack-lab session is a deterministic, simulated fixture. No attack was executed or detected.",
         "Camera integrity: 82/100 risk. fixture",
@@ -43,7 +43,7 @@ def test_virtual_fixture_reasons_match_typescript_text():
 
 
 def test_empty_and_simulated_live_sessions_never_approve():
-    for signals in ([], rows([8, 5, 9, 7, 5])):
+    for signals in ([], rows([8, 5, 9, 7, 5, 6])):
         result = evaluate_risk(signals, "live")
         assert (result["risk"], result["coverage"], result["decision"]) == (60, 0, "step-up")
     assert evaluate_risk(heuristic(0), "live")["decision"] == "step-up"
@@ -52,6 +52,7 @@ def test_empty_and_simulated_live_sessions_never_approve():
 def test_invalid_missing_duplicate_and_non_finite_scores_cost_60():
     signals = heuristic(0)
     signals[0]["risk"], signals[1]["risk"], signals[2]["risk"], signals[3]["risk"] = float("nan"), -1, 101, float("inf")
+    signals[5]["risk"] = None
     signals.append(dict(signals[4]))
     result = evaluate_risk(signals, "live")
     assert (result["risk"], result["coverage"], result["decision"]) == (60, 0, "step-up")
@@ -77,7 +78,7 @@ def test_virtual_label_vetoes_approval_but_cannot_reject():
 
 def test_live_reject_and_server_provenance_is_usable_live():
     assert evaluate_risk(heuristic(80), "live")["decision"] == "reject"
-    assert evaluate_risk(rows([80] * 5, "server"), "live")["coverage"] == 100
+    assert evaluate_risk(rows([80] * len(SIGNAL_IDS), "server"), "live")["coverage"] == 100
 
 
 def test_inputs_are_not_mutated():
@@ -88,13 +89,13 @@ def test_inputs_are_not_mutated():
 
 
 def test_freshness_is_a_veto_not_a_weight():
-    clean = evaluate_risk(rows([8, 5, 9, 7, 5]), "simulation")
+    clean = evaluate_risk(rows([8, 5, 9, 7, 5, 6]), "simulation")
     kept = apply_freshness(clean, {"id": "freshness", "risk": 10, "provenance": "server", "detail": "ok"})
-    assert (kept["decision"], kept["risk"]) == ("approve", 7)
+    assert (kept["decision"], kept["risk"]) == ("approve", 6)
     assert kept["reasons"][-1].startswith("Freshness (server-checked): clean")
     for risk in (70, 85, None):
         vetoed = apply_freshness(clean, {"id": "freshness", "risk": risk, "provenance": "server", "detail": "bad"})
-        assert (vetoed["decision"], vetoed["risk"]) == ("step-up", 7)
+        assert (vetoed["decision"], vetoed["risk"]) == ("step-up", 6)
         assert any("veto" in reason for reason in vetoed["reasons"])
     soft = apply_freshness(clean, {"id": "freshness", "risk": 50, "provenance": "server", "detail": "soft"})
     assert soft["decision"] == "approve" and "flagged" in soft["reasons"][-1]

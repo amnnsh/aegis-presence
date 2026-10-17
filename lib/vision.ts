@@ -9,6 +9,7 @@ import type {
 import { extractHeadPose } from "./head-pose.ts";
 import { lockCamera, unlockCamera } from "./reflection.ts";
 import { frameTimingStats, grayHash, summarizeCapabilities } from "./injection.ts";
+import { loadTextureModels, scoreFrame } from "./texture.ts";
 import type { FrameSample } from "./injection.ts";
 import type { CameraLockKey } from "./reflection.ts";
 
@@ -108,6 +109,11 @@ export class BrowserVision {
   private pulseMotion = false;
   private previousNose: Point | null = null;
 
+  // Screen/print texture scores, sampled during the pulse window. Sequential: one inference at a time.
+  private textureScores: number[] | null = null;
+  private textureBusy = false;
+  private lastTextureAt = -Infinity;
+
   // Inference performance
   private fast = false;
   private lastCost = 0;
@@ -155,6 +161,9 @@ export class BrowserVision {
     this.pulseAnchors = null;
     this.previousNose = null;
     this.pulseMotion = false;
+
+    this.textureScores = [];
+    this.lastTextureAt = -Infinity;
   }
 
   /**
@@ -169,6 +178,7 @@ export class BrowserVision {
     this.pulseAnchors = null;
     this.previousNose = null;
     this.pulseMotion = false;
+    this.textureScores = null;
 
     return samples;
   }
@@ -177,6 +187,38 @@ export class BrowserVision {
     return this.pulseSamples
       ? [...this.pulseSamples]
       : [];
+  }
+
+  /** Real-face probabilities (0..1) collected so far in this pulse window. */
+  getTextureScores(): number[] {
+    return this.textureScores
+      ? [...this.textureScores]
+      : [];
+  }
+
+  /** About one frame every 500 ms; awaited, never overlapping. A restarted pulse window drops late results. */
+  private async sampleTexture(now: number, points: Point[]): Promise<void> {
+    const video = this.video;
+    const scores = this.textureScores;
+
+    if (
+      !video ||
+      !scores ||
+      this.textureBusy ||
+      now - this.lastTextureAt < 500
+    ) {
+      return;
+    }
+
+    this.textureBusy = true;
+    this.lastTextureAt = now;
+
+    try {
+      const score = await scoreFrame(video, points);
+      if (score !== null && this.textureScores === scores) scores.push(score);
+    } finally {
+      this.textureBusy = false;
+    }
   }
 
   /** Sample stable forehead and cheek RGB regions without storing video. */
@@ -445,6 +487,9 @@ export class BrowserVision {
 
       this.callbacks.model("ready");
 
+      // Warm the texture models before the pulse window; a failure only leaves that signal unavailable.
+      loadTextureModels().catch(() => console.warn("Texture models could not load; the texture check will be unavailable."));
+
       this.raf = requestAnimationFrame(
         this.loop
       );
@@ -611,6 +656,10 @@ export class BrowserVision {
 
         this.previousNose =
           nose ? { ...nose } : null;
+
+        if (this.textureScores && faceCount === 1) {
+          void this.sampleTexture(now, points);
+        }
 
         // Facial expression scores.
         const categories =

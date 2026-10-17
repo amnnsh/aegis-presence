@@ -1,6 +1,7 @@
 "use client";
 import * as React from "react";
 import { analyzePulse, previewPulse } from "../lib/rppg.ts";
+import { analyzeTexture, median } from "../lib/texture.ts";
 import { BrowserVision, cameraError } from "../lib/vision.ts";
 import { createPlan, createTracker, challengeTitle, challengeHint, livenessSignal } from "../lib/challenges.ts";
 import type { ChallengeTracker, CueDisplay } from "../lib/challenges.ts";
@@ -39,6 +40,8 @@ const noReflection = (detail = "Screen-color check was not performed. Skipping i
 
 const noPulse = (detail = "Pulse measurement skipped or unavailable."): Signal => ({ id: "pulse", risk: null, provenance: "unavailable", detail });
 
+const noTexture = (detail = "Screen/print texture was not measured: it runs only during the pulse window."): Signal => ({ id: "texture", risk: null, provenance: "unavailable", detail });
+
 const noSync = (): Signal => ({ id: "sync", risk: null, provenance: "unavailable", detail: "Lip / voice timing was not measured: the microphone was off or denied, or the digits prompt did not finish. Nothing is simulated in its place." });
 
 export class Verification extends React.Component<Record<string, never>, State> {
@@ -61,6 +64,8 @@ export class Verification extends React.Component<Record<string, never>, State> 
   private lightLock: CameraLockKey[] = []; // camera auto-corrections held during the light check
   private samples: ColorSample[] = [];
   private pulseSignal: Signal = noPulse();
+  private textureSignal: Signal = noTexture();
+  private textureMedian: number | null = null; // last pulse window's median, for the ?debug=1 readout
   private session: ServerSession | null = null; // null = local only
   private audio: AudioCapture | null = null; // microphone; open only with explicit consent
   private speech: DigitsCheck | null = null; // set only during a microphone-backed digits prompt
@@ -84,7 +89,7 @@ export class Verification extends React.Component<Record<string, never>, State> 
     this.generation++; this.clearTimer(); this.tracker = null;
     this.speech?.cancel(); this.speech = null; this.finishing = false; this.digitMetrics = null;
     this.audio?.stop(); this.audio = null; this.sync = noSync();
-    this.engine?.stop(); this.engine = null; this.samples = []; this.pulseSignal = noPulse();
+    this.engine?.stop(); this.engine = null; this.samples = []; this.pulseSignal = noPulse(); this.textureSignal = noTexture(); this.textureMedian = null;
     if (this.samplesCanvas) { this.samplesCanvas.width = 0; this.samplesCanvas.height = 0; this.samplesCanvas = null; }
     if (this.overlay) this.overlay.getContext("2d")?.clearRect(0, 0, this.overlay.width, this.overlay.height);
   }
@@ -162,9 +167,13 @@ export class Verification extends React.Component<Record<string, never>, State> 
       }
     }
     if (this.debug && this.debugEl) {
-      this.debugEl.textContent = m.yawDeg === undefined || m.pitchDeg === undefined
+      const pose = m.yawDeg === undefined || m.pitchDeg === undefined
         ? "pose: no single face / no matrix"
         : `${describePose(m.yawDeg, m.pitchDeg)}  roll ${(m.rollDeg ?? 0).toFixed(1)}°  (raw, not baseline-relative)`;
+      const scores = this.state.stage === "pulse" ? this.engine?.getTextureScores() ?? [] : null;
+      const textureMedian = scores ? median(scores) : this.textureMedian;
+      const texture = `texture median ${textureMedian === null ? "--" : textureMedian.toFixed(2)}${scores ? ` (n=${scores.length}, live)` : ""}`;
+      this.debugEl.textContent = `${pose}\n${texture}`;
     }
     if (this.state.stage === "challenge" && this.tracker && !this.finishing) {
       const result = this.tracker.update(m);
@@ -242,11 +251,13 @@ export class Verification extends React.Component<Record<string, never>, State> 
     if (!this.engine || this.state.model !== "ready") {
       const detail = "Face model unavailable. Pulse evidence was not collected.";
       this.pulseSignal = noPulse(detail);
+      this.textureSignal = noTexture("Face model unavailable. Texture evidence was not collected.");
       this.setState({ stage: "pulse-result", pulseStatus: "failed", pulseDetail: detail, pulseBpm: null, pulseWave: [] });
       return;
     }
     this.clearTimer(); this.engine.startPulse();
     this.pulseSignal = noPulse();
+    this.textureSignal = noTexture();
     const started = performance.now();
     this.setState({ stage: "pulse", pulseSeconds: 12, pulseBpm: null, pulseWave: [], pulseStatus: "idle", pulseDetail: "" });
     this.timer = setInterval(() => {
@@ -263,6 +274,13 @@ export class Verification extends React.Component<Record<string, never>, State> 
   private endPulse(skipped = false) {
     if (this.state.stage !== "pulse") return;
     this.clearTimer();
+    // Texture scores are independent of the pulse result: whatever was collected before a skip still counts.
+    const textureScores = this.engine?.getTextureScores() ?? [];
+    const texture = analyzeTexture(textureScores);
+    this.textureMedian = median(textureScores);
+    this.textureSignal = texture.risk === null ? noTexture(`${texture.detail}: ${textureScores.length} texture scores collected.`) :
+      { id: "texture", risk: texture.risk, provenance: "heuristic", detail: texture.detail };
+    if (this.debug) console.info("[texture]", { median: this.textureMedian, risk: texture.risk, scores: textureScores.map(s => Math.round(s * 1000) / 1000) });
     const samples = this.engine?.stopPulse() ?? [];
     const result = skipped ? null : analyzePulse(samples);
     this.pulseSignal = result?.risk === null || !result ? noPulse(skipped ? "User skipped pulse measurement." : result?.detail) :
@@ -327,6 +345,7 @@ export class Verification extends React.Component<Record<string, never>, State> 
     const signals: Signal[] = [inspectCamera(this.state.device), livenessSignal(this.state.results), reflection,
       this.pulseSignal,
       this.sync, // measured on-device during the digits prompt, or unavailable; never a simulated constant
+      this.textureSignal, // experimental Silent-Face CNN, sampled during the pulse window
     ];
     const local = evaluateRisk(signals, "live");
     const session = this.session; this.session = null;
@@ -416,8 +435,8 @@ export class Verification extends React.Component<Record<string, never>, State> 
         </> : <div className="lab-stage"><div className="lab-art"><div className="lab-grid" /><Icon name={s.scenario === "normal" ? "shield" : s.scenario === "virtual" ? "camera" : s.scenario === "replay" ? "play" : "scan"} size={70} /><span className="source-badge source-simulated">Synthetic fixture</span></div><div className="lab-copy"><span className="eyebrow">ATTACK SIMULATION</span><h2>{SCENARIOS.find(item => item.id === s.scenario)!.title}</h2><p>{SCENARIOS.find(item => item.id === s.scenario)!.description}</p><div className="notice notice-amber"><Icon name="info" size={17} /><p>This loads fictional signal scores into the real demo risk function. No media sample is loaded, no attack is executed, and no detector is benchmarked. Camera permission is not needed.</p></div><button className="button button-primary" onClick={() => this.runSimulation()}>Run simulated scenario<Icon name="arrow" size={18} /></button></div></div>}
         </div>
       </section>
-      <aside className="verification-sidebar"><section className="panel attack-panel"><div className="panel-heading"><span className="icon-box"><Icon name="code" size={18} /></span><div><h2>Attack simulation</h2><span className="microcopy">Predictable, fictional outcomes</span></div></div><fieldset disabled={active}><legend className="sr-only">Choose a simulated scenario</legend>{SCENARIOS.map(item => <label key={item.id} className={`scenario-option ${s.scenario === item.id && s.tab === "lab" ? "scenario-selected" : ""}`}><input type="radio" name="scenario" value={item.id} checked={s.scenario === item.id} onChange={() => this.setState({ scenario: item.id, tab: "lab" })} /><span><strong>{item.title}</strong><small>{item.description}</small></span></label>)}<button className="button button-secondary full-width" onClick={() => this.runSimulation()}><Icon name="play" size={15} />Run simulation</button></fieldset><p className="panel-footnote">{active ? "Stop the live session before switching scenarios." : "All five scores are simulated in this mode."}</p></section>
-      <section className="panel signals-panel"><div className="section-heading"><h2>Signal stack</h2><span className="mono microcopy">5 LAYERS</span></div>{SIGNALS.map((signal, i) => <div className="readiness-row" key={signal.id}><Icon name={signalIcons[i]} size={17} /><div><strong>{signal.title}</strong><span>{i === 3 ? "Experimental / on-device" : i === 4 ? s.mic === "ready" ? "Microphone on / on-device" : s.mic === "blocked" ? "Microphone unavailable" : s.micConsent ? "Optional / enabled" : "Optional / microphone off" : i === 0 ? s.device ? "Metadata received" : "Waiting for camera" : i === 1 ? s.model === "ready" ? "Landmark engine ready" : "Waiting for landmarks" : s.lightConsent ? "Optional / enabled" : "Optional / off"}</span></div><span className={`readiness-dot ${i === 3 && s.model === "ready" ? "readiness-ready" : i === 0 && s.device || i === 1 && s.model === "ready" || i === 4 && s.mic === "ready" ? "readiness-ready" : ""}`} title="Local heuristic" /></div>)}<div className="signal-legend"><span><i className="readiness-dot readiness-ready" />Local heuristic</span><span><i className="readiness-dot readiness-mock" />Simulated</span></div></section>
+      <aside className="verification-sidebar"><section className="panel attack-panel"><div className="panel-heading"><span className="icon-box"><Icon name="code" size={18} /></span><div><h2>Attack simulation</h2><span className="microcopy">Predictable, fictional outcomes</span></div></div><fieldset disabled={active}><legend className="sr-only">Choose a simulated scenario</legend>{SCENARIOS.map(item => <label key={item.id} className={`scenario-option ${s.scenario === item.id && s.tab === "lab" ? "scenario-selected" : ""}`}><input type="radio" name="scenario" value={item.id} checked={s.scenario === item.id} onChange={() => this.setState({ scenario: item.id, tab: "lab" })} /><span><strong>{item.title}</strong><small>{item.description}</small></span></label>)}<button className="button button-secondary full-width" onClick={() => this.runSimulation()}><Icon name="play" size={15} />Run simulation</button></fieldset><p className="panel-footnote">{active ? "Stop the live session before switching scenarios." : "All six scores are simulated in this mode."}</p></section>
+      <section className="panel signals-panel"><div className="section-heading"><h2>Signal stack</h2><span className="mono microcopy">{SIGNALS.length} LAYERS</span></div>{SIGNALS.map((signal, i) => <div className="readiness-row" key={signal.id}><Icon name={signalIcons[i]} size={17} /><div><strong>{signal.title}</strong><span>{signal.id === "pulse" || signal.id === "texture" ? "Experimental / on-device" : signal.id === "sync" ? s.mic === "ready" ? "Microphone on / on-device" : s.mic === "blocked" ? "Microphone unavailable" : s.micConsent ? "Optional / enabled" : "Optional / microphone off" : signal.id === "injection" ? s.device ? "Metadata received" : "Waiting for camera" : signal.id === "liveness" ? s.model === "ready" ? "Landmark engine ready" : "Waiting for landmarks" : s.lightConsent ? "Optional / enabled" : "Optional / off"}</span></div><span className={`readiness-dot ${(signal.id === "pulse" || signal.id === "texture" || signal.id === "liveness") && s.model === "ready" || signal.id === "injection" && s.device || signal.id === "sync" && s.mic === "ready" ? "readiness-ready" : ""}`} title="Local heuristic" /></div>)}<div className="signal-legend"><span><i className="readiness-dot readiness-ready" />Local heuristic</span><span><i className="readiness-dot readiness-mock" />Simulated</span></div></section>
       {s.device && <section className="panel device-panel"><span className="eyebrow">OBSERVED CAMERA METADATA</span><dl><div><dt>Device label</dt><dd>{s.device.label || "Unavailable"}</dd></div><div><dt>Resolution</dt><dd>{s.device.width ?? "?"} &times; {s.device.height ?? "?"}</dd></div><div><dt>Reported cadence</dt><dd>{s.device.declaredFps?.toFixed(1) ?? "N/A"} fps</dd></div><div><dt>Observed cadence</dt><dd>{s.device.observedFps ?? "Sampling / unavailable"}{s.device.observedFps !== null ? " fps" : ""}</dd></div><div><dt>Camera controls</dt><dd>{describeControls(s.device)}</dd></div><div><dt>Frame timing</dt><dd>{describeFrameTiming(s.device.frameTiming)}</dd></div></dl><p className="microcopy">Labels, settings, and frame timing are spoofable. Cadence can vary with device load; only a count of cameras is read, and no device ID is collected.</p></section>}
       <PrivacyNote /></aside></div><PrototypeNotice /></>}
     </main><Footer />{s.stage === "reflection" && this.renderLightOverlay()}</>;

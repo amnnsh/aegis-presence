@@ -29,18 +29,18 @@ test("all attack fixtures are labeled and produce deterministic decisions", asyn
   await page.goto("/verify/?mode=lab");
   await page.getByRole("button", { name: "Run simulated scenario", exact: true }).click();
   for (const [label, decision, score] of [
-    ["Normal user", "Approve", "7/100"],
-    ["Replayed video", "Reject", "73/100"],
-    ["Virtual-camera feed", "Step-up", "31/100"],
-    ["Deepfake sample", "Reject", "67/100"],
+    ["Normal user", "Approve", "6/100"],
+    ["Replayed video", "Reject", "76/100"],
+    ["Virtual-camera feed", "Step-up", "30/100"],
+    ["Deepfake sample", "Reject", "66/100"],
   ]) {
     await page.getByRole("button", { name: label, exact: true }).click();
     await expect(page.locator(".result-view .decision-badge")).toHaveText(decision);
     await expect(page.locator(".risk-dial strong")).toHaveText(score);
-    await expect(page.locator(".result-view .source-simulated")).toHaveCount(5);
+    await expect(page.locator(".result-view .source-simulated")).toHaveCount(6);
   }
   await page.getByText("Inspect the scoring formula and thresholds").click();
-  await expect(page.locator(".policy-details table tbody tr")).toHaveCount(5);
+  await expect(page.locator(".policy-details table tbody tr")).toHaveCount(6);
 });
 
 test("mock dashboard filters and opens evidence", async ({ page }) => {

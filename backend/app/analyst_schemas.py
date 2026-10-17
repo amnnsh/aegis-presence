@@ -19,6 +19,7 @@ class EvidenceFinding(BaseModel):
         "reflection",
         "pulse",
         "sync",
+        "texture",
         "freshness",
     ]
 

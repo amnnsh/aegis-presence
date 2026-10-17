@@ -4,7 +4,8 @@ export type SignalId =
   | "liveness"
   | "reflection"
   | "pulse"
-  | "sync";
+  | "sync"
+  | "texture";
 
 export type Provenance =
   | "observed"

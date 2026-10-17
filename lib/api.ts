@@ -40,7 +40,8 @@ export type GeminiSignalId =
   | "liveness"
   | "reflection"
   | "pulse"
-  | "sync";
+  | "sync"
+  | "texture";
 
 export type GeminiConcern =
   | "low"

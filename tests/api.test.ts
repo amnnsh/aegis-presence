@@ -32,7 +32,7 @@ test("server result maps to the UI shape with freshness kept out of the weighted
   const response: CompleteResponse = { ...local, mode: "live", session_id: "s-1", policy_version: "0.2.0", token: "a.b.c",
     signals: [...local.signals, { id: "freshness", risk: 85, provenance: "server", detail: "flagged" }] };
   const result = toDecisionResult(response)!;
-  assert.equal(result.signals.length, 5);
+  assert.equal(result.signals.length, SIGNALS.length);
   assert.deepEqual(result.server, { sessionId: "s-1", policyVersion: "0.2.0", token: "a.b.c", freshness: { risk: 85, provenance: "server", detail: "flagged" } });
   assert.equal(toDecisionResult({ ...response, signals: local.signals }), null);
   assert.equal(toDecisionResult({ ...response, decision: "maybe" as never }), null);
