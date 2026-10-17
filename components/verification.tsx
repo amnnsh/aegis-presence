@@ -1,6 +1,6 @@
 "use client";
 import * as React from "react";
-import { analyzePulse, previewPulse, type RGBSample } from "../lib/rppg.ts";
+import { analyzePulse, previewPulse, pulseLightingGuidance, type RGBSample } from "../lib/rppg.ts";
 import { BrowserVision, cameraError } from "../lib/vision.ts";
 import { createPlan, createTracker, challengeTitle, challengeHint, livenessSignal } from "../lib/challenges.ts";
 import type { ChallengeTracker, CueDisplay } from "../lib/challenges.ts";
@@ -38,6 +38,7 @@ function initialState(): State {
 const noReflection = (detail = "Screen-color check was not performed. Skipping is supported and never counts as a pass."): Signal => ({ id: "reflection", risk: null, provenance: "unavailable", detail });
 
 const noPulse = (detail = "Pulse measurement skipped or unavailable."): Signal => ({ id: "pulse", risk: null, provenance: "unavailable", detail });
+const PULSE_CAPTURE_HINT = "Face a soft light, keep bright lamps or windows behind the camera, and hold still for the full sample.";
 
 const noSync = (): Signal => ({ id: "sync", risk: null, provenance: "unavailable", detail: "Lip / voice timing was not measured: the microphone was off or denied, or the digits prompt did not finish. Nothing is simulated in its place." });
 
@@ -259,14 +260,15 @@ export class Verification extends React.Component<Record<string, never>, State> 
       pulseBpm: null,
       pulseWave: [],
       pulseStatus: "idle",
-      pulseDetail: "Face a soft light, keep bright lamps or windows behind the camera, and hold still for the full sample."
+      pulseDetail: PULSE_CAPTURE_HINT
     });
     this.timer = setInterval(() => {
       const elapsed = performance.now() - started;
       const seconds = Math.max(0, Math.ceil((18000 - elapsed) / 1000));
       const samples = this.engine?.getPulseSamples() ?? [];
-      if (seconds !== this.state.pulseSeconds || samples.length !== this.state.pulseFrames) {
-        this.setState({ pulseSeconds: seconds, pulseFrames: samples.length });
+      const pulseDetail = pulseLightingGuidance(samples) ?? PULSE_CAPTURE_HINT;
+      if (seconds !== this.state.pulseSeconds || samples.length !== this.state.pulseFrames || pulseDetail !== this.state.pulseDetail) {
+        this.setState({ pulseSeconds: seconds, pulseFrames: samples.length, pulseDetail });
       }
       if (elapsed >= 4000 && Math.floor(elapsed / 1000) !== Math.floor((elapsed - 250) / 1000)) {
         const preview = previewPulse(samples);
