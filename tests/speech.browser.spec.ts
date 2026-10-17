@@ -27,8 +27,9 @@ test("quiet speech passes through microphone capture and the real speech worker"
     window.Worker = class extends NativeWorker {
       constructor(...args: ConstructorParameters<typeof Worker>) {
         super(...args);
+        const events = (window as Window & { __aegisWorkerEvents?: unknown[] }).__aegisWorkerEvents;
+        events?.push({ type: "constructed", url: String(args[0]) });
         this.addEventListener("message", event => {
-          const events = (window as Window & { __aegisWorkerEvents?: unknown[] }).__aegisWorkerEvents;
           events?.push({ type: "message", data: event.data });
           if (events && events.length > 30) events.shift();
         });
