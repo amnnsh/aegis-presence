@@ -74,6 +74,49 @@ Expected if the starting thresholds hold: runs 1 to 5 mostly give sync risk 15 t
 
 Known limits to keep in the pitch: the digit check verifies words, not the speaker, so a cloned or replayed voice saying the right digits passes it; the timing check is a loudness / mouth-opening correlation that a face animated from the same audio would also pass; background speech, a covered mouth, or poor light can fail a genuine user.
 
+## Full-screen light check (added October 17, 2026)
+
+The light-response check now fills the whole viewport with saturated red / green / blue plateaus (1.5 s each, 250 ms crossfade, six steps, no color twice in a row). Before the plateaus start it asks the camera to hold exposure and white balance where the camera supports it. It samples 12x12 patches on the forehead and both cheeks, 500 ms after each color appears. Before this change the color only lit a 14 px border with pastels, so the check almost always returned "too weak to measure".
+
+### Executed
+
+- `npm run check` passed: type-check, unit tests, and the static build. `tests/reflection.test.ts` covers the color sequence (500 draws: six steps, each color twice, no adjacent repeats), the 4.5:1 text contrast of the black panels on every stimulus, the forehead / cheek patch selection, the correlation on synthetic tinted skin, and camera locking against fake tracks (supported keys only, settings read back, restore to continuous, no calls on an ended track).
+- `tests/light.browser.spec.ts` drove the built export in headless Chromium (desktop and Pixel 7 emulation) with Chromium's synthetic camera and an emulated webcam that reports manual exposure / white balance. Both runs passed. The overlay covered the full viewport, and the colors changed with a 0.25 s transition (0 s under reduced motion). The covered main `<video>` and the mirrored thumbnail both kept playing. Skip took focus and Tab could not leave the dialog, and Escape skipped the check. The camera received `manual` before the plateaus and `continuous` before the track stopped. The result reported "Exposure and white balance locked."
+- The synthetic camera has no face, so **no correlation was measured**. These runs prove the plumbing, not the physics.
+
+### NOT executed: threshold tuning and the acceptance runs
+
+The correlation cut-offs in `lib/reflection.ts` (`REFLECTION`: 0.4 for risk 25, 0.15 for risk 50, chroma RMS 0.003 for "too weak") are **unchanged, untuned starting points**. Tuning needs the team's own recordings, which do not exist yet. The Light response row of the result view shows the correlation, the chroma RMS, and whether the camera was locked. Copy those three values from each run.
+
+Device: ____  Browser and version: ____  Camera: ____  Screen brightness: ____  Room light: ____  Date: ____
+
+| Run | Condition | Camera lock reported | Correlation | Chroma RMS | Light risk |
+| --- | --- | --- | --- | --- | --- |
+| R1 | Real person, laptop, normal room light | | | | |
+| R2 | Real person, laptop, normal room light | | | | |
+| R3 | Real person, laptop, normal room light | | | | |
+| R4 | Real person, laptop, normal room light | | | | |
+| R5 | Real person, laptop, normal room light | | | | |
+| R6 | Real person, dimmer room | | | | |
+| R7 | Real person, dimmer room | | | | |
+| R8 | Real person, different skin tone | | | | |
+| R9 | Real person, different skin tone | | | | |
+| R10 | Real person, glasses | | | | |
+| P1 | Phone screen replaying a recorded face, held to the webcam | | | | |
+| P2 | Phone screen replay | | | | |
+| P3 | Phone screen replay | | | | |
+| P4 | Phone screen replay | | | | |
+| P5 | Phone screen replay | | | | |
+| P6 | Phone screen replay, phone brightness at maximum | | | | |
+| P7 | Phone screen replay, phone brightness at maximum | | | | |
+| P8 | Phone screen replay, tilted to catch the laptop's light | | | | |
+| P9 | Phone screen replay, tilted to catch the laptop's light | | | | |
+| P10 | Phone screen replay, second phone | | | | |
+
+**Acceptance:** at least 4 of R1 to R5 show a measured correlation, not "too weak", and the P runs are clearly lower than the R runs. If they are, set `REFLECTION.strong` just below the lowest R correlation and `REFLECTION.weak` just above the highest P correlation. Record the before and after values here and update the threshold test in `tests/reflection.test.ts`. If the ranges overlap, keep the check as a weak signal and say so in the pitch. If most R runs are still "too weak", note whether "Camera lock reported" said "Auto exposure"; many built-in laptop cameras do not expose manual modes to the browser.
+
+Known limits: a replay screen can also pick up some of the laptop's colored light, so this separates poorly lit replays, not careful ones. The camera is restored to automatic when the session ends, but a tab killed mid-check cannot run that restore.
+
 ## Security/evaluation status
 
 No labeled deepfake benchmark, anti-spoofing certification, penetration test, demographic evaluation, calibrated probability, independence proof, or accessibility certification was performed. All fixture risks and policy weights are illustrative. A high-risk live heuristic is not proof of fraud. A low-risk synthetic fixture is not proof of a person's identity. The frontend is client-tamperable and must not authorize access.

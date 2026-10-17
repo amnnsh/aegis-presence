@@ -7,6 +7,8 @@ import type {
 } from "./types.ts";
 
 import { extractHeadPose } from "./head-pose.ts";
+import { lockCamera, unlockCamera } from "./reflection.ts";
+import type { CameraLockKey } from "./reflection.ts";
 
 type Detector = {
   detectForVideo(
@@ -99,16 +101,38 @@ export class BrowserVision {
   private pulseMotion = false;
   private previousNose: Point | null = null;
 
-  // Head-pose debugging
-  private lastPoseLog = 0;
-  private debugPose = false;
-
   // Inference performance
   private fast = false;
   private lastCost = 0;
 
+  // Exposure / white balance switched to manual for the light check.
+  private locked: CameraLockKey[] = [];
+
   constructor(callbacks: Callbacks) {
     this.callbacks = callbacks;
+  }
+
+  /** The live camera track, or null before start() and after stop(). */
+  get videoTrack(): MediaStreamTrack | null {
+    const track = this.stream?.getVideoTracks()[0] ?? null;
+    return track?.readyState === "live" ? track : null;
+  }
+
+  /** Holds exposure and white balance where the camera supports it. Returns what was locked. */
+  async lockForLight(): Promise<CameraLockKey[]> {
+    if (this.cancelled) return [];
+    const track = this.videoTrack;
+    const keys = await lockCamera(track);
+    if (this.cancelled) { await unlockCamera(track, keys); return []; }
+    this.locked = keys;
+    return keys;
+  }
+
+  /** Back to automatic exposure / white balance. Safe to call when nothing is locked. */
+  unlockAfterLight(): Promise<void> {
+    const keys = this.locked;
+    this.locked = [];
+    return unlockCamera(this.videoTrack, keys);
   }
 
   /**
@@ -272,9 +296,6 @@ export class BrowserVision {
     }
 
     this.video = video;
-    this.debugPose =
-      new URLSearchParams(window.location.search)
-        .get("debug") === "1";
 
     document.addEventListener(
       "visibilitychange",
@@ -553,7 +574,8 @@ export class BrowserVision {
             );
         }
 
-        // New 3D head-pose extraction.
+        // 3D head pose in degrees from the 4x4 column-major transform.
+        // Shown live by the ?debug=1 overlay in components/verification.tsx.
         const matrix =
           result.facialTransformationMatrixes?.[0]?.data;
 
@@ -561,21 +583,6 @@ export class BrowserVision {
           faceCount === 1 && matrix
             ? extractHeadPose(matrix)
             : null;
-
-        // Debug logs only when ?debug=1.
-        if (
-          pose &&
-          this.debugPose &&
-          now - this.lastPoseLog > 500
-        ) {
-          this.lastPoseLog = now;
-
-          console.log("HEAD POSE:", {
-            yaw: pose.yawDeg.toFixed(1),
-            pitch: pose.pitchDeg.toFixed(1),
-            roll: pose.rollDeg.toFixed(1)
-          });
-        }
 
         // Publish measurements.
         this.callbacks.metrics({
@@ -636,13 +643,20 @@ export class BrowserVision {
       this.onPageHide
     );
 
-    this.stream?.getTracks().forEach(track => {
+    // Restore automatic exposure first: some webcams keep manual mode in firmware after
+    // the track closes. Bounded, so a slow driver only delays the camera light briefly.
+    const tracks = this.stream?.getTracks() ?? [];
+    const restoring = this.locked.length
+      ? Promise.race([this.unlockAfterLight(), new Promise(resolve => setTimeout(resolve, 800))])
+      : null;
+    const stopTracks = () => tracks.forEach(track => {
       track.removeEventListener(
         "ended",
         this.interrupt
       );
       track.stop();
     });
+    if (restoring) restoring.finally(stopTracks); else stopTracks();
 
     this.stream = null;
 

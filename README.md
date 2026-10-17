@@ -26,7 +26,7 @@ A convincing face on a screen is not proof that a real person is present. Replay
 | Layer | Demo capability | Reality check |
 | --- | --- | --- |
 | 📷 Camera integrity | Reads browser-exposed camera metadata and frame cadence | Spoofable signals; not hardware attestation |
-| 👁️ Active liveness | Random head turn, two blinks, and a four-digit prompt. With the optional microphone, an on-device speech model (Whisper tiny) checks the spoken digits | Checks the words, not the speaker. Without the microphone it is mouth motion only. Does not certify liveness |
+| 👁️ Active liveness | A random three-move head sequence (left / right / up / down, one arrow at a time), blinks that must answer randomly timed ring cues within 150-1500 ms, and a four-digit prompt. Prompts advance automatically, and cue / response timings are logged for the server. With the optional microphone, an on-device speech model (Whisper tiny) checks the spoken digits | Checks the words, not the speaker. Without the microphone it is mouth motion only. Does not certify liveness |
 | 🌈 Screen-light response | Optional six-step color stimulus and cheek-color sampling | Experimental; affected by lighting, exposure, and movement |
 | 💓 Pulse signal (rPPG) | Experimental on-device skin-color pulse estimate | Unvalidated; not proof of liveness or medical heart rate |
 | 🔊 Audio-visual sync | With the optional microphone, correlates mouth opening with loudness during the digits prompt, on-device | Untuned correlation heuristic, **not** a lip-sync model. Unavailable (never simulated) without the microphone |
@@ -134,6 +134,8 @@ npm test
 npm run build
 npm run start
 ```
+
+**Head-pose sign check:** open **http://localhost:3000/verify/?debug=1**, start the webcam, and watch the yellow readout on the preview. Turning to your own left should read `user's LEFT` (positive yaw), and looking up should read `user's UP` (negative pitch). If either is reversed on some device, flip its sign in `MOVE_AXIS` in `lib/head-pose.ts`; the arrows, tracker, and readout all use that one table.
 
 `npm run start` previews the static production export at `http://localhost:3000`; stop the development server first. For browser tests after a successful build:
 
