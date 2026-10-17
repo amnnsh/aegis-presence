@@ -101,6 +101,8 @@ export class BrowserVision {
 
   // rPPG sampling state
   private pulseSamples: RGBSample[] | null = null;
+  private pulseFallbackTimer: ReturnType<typeof setInterval> | null = null;
+  private pulseFallbackMediaTime = -1;
   private pulseCanvas: HTMLCanvasElement | null = null;
   private pulsePoints: Point[] = [];
   private pulseAnchors: { x: number; y: number; boxX: number; boxY: number; width: number; height: number }[] | null = null;
@@ -155,6 +157,19 @@ export class BrowserVision {
     this.pulseAnchors = null;
     this.previousNose = null;
     this.pulseMotion = false;
+    this.pulseFallbackMediaTime = -1;
+
+    // Safari and older browsers may lack requestVideoFrameCallback. Sample
+    // advancing video frames on a timer so the pulse check can still collect
+    // evidence instead of silently finishing with zero samples.
+    if (typeof this.video?.requestVideoFrameCallback !== "function") {
+      this.pulseFallbackTimer = setInterval(() => {
+        const video = this.video;
+        if (!video || video.readyState < 2 || video.currentTime === this.pulseFallbackMediaTime) return;
+        this.pulseFallbackMediaTime = video.currentTime;
+        this.samplePulse(performance.now());
+      }, 33);
+    }
   }
 
   /**
@@ -162,6 +177,8 @@ export class BrowserVision {
    */
   stopPulse(): RGBSample[] {
     const samples = this.pulseSamples ?? [];
+    if (this.pulseFallbackTimer) clearInterval(this.pulseFallbackTimer);
+    this.pulseFallbackTimer = null;
 
     this.pulseSamples = null;
     this.pulseCanvas = null;
