@@ -6,6 +6,8 @@ export interface RGBSample {
   motion?: boolean;
   /** Green-channel mean from the tracked forehead patch, when available. */
   gForehead?: number;
+  /** Green-channel mean from nearby non-face patches, when available. */
+  gBackground?: number;
 }
 
 export interface PulseQuality {
@@ -117,6 +119,12 @@ export function resample(
       r: a.r + (b.r - a.r) * fraction,
       g: a.g + (b.g - a.g) * fraction,
       b: a.b + (b.b - a.b) * fraction,
+      ...(a.gForehead != null && b.gForehead != null
+        ? { gForehead: a.gForehead + (b.gForehead - a.gForehead) * fraction }
+        : {}),
+      ...(a.gBackground != null && b.gBackground != null
+        ? { gBackground: a.gBackground + (b.gBackground - a.gBackground) * fraction }
+        : {}),
       motion: Boolean(a.motion || b.motion)
     });
   }
@@ -527,6 +535,53 @@ function evaluateGreenFallback(
   };
 }
 
+/** Remove brightness fluctuations shared by the forehead and room. */
+function evaluateBackgroundCorrected(
+  valid: RGBSample[],
+  quality: PulseQuality
+): PulseResult | null {
+  const paired = valid.filter(sample =>
+    Number.isFinite(sample.gForehead) && (sample.gForehead ?? 0) > 0 &&
+    Number.isFinite(sample.gBackground) && (sample.gBackground ?? 0) > 0
+  );
+  if (paired.length < 2) return null;
+  const duration = (paired[paired.length - 1].t - paired[0].t) / 1000;
+  if (duration < MIN_SECONDS || (paired.length - 1) / duration < 12) return null;
+
+  const uniform = resample(paired);
+  const foreheadMean = mean(uniform.map(sample => sample.gForehead!));
+  const backgroundMean = mean(uniform.map(sample => sample.gBackground!));
+  if (foreheadMean <= 0 || backgroundMean <= 0) return null;
+  const pulse = bandpassCardiac(uniform.map(sample =>
+    sample.gForehead! / foreheadMean - sample.gBackground! / backgroundMean
+  ));
+  if (std(pulse) < AMPLITUDE_FLOOR) return null;
+  const frequency = estimateFrequency(pulse);
+  if (!frequency ||
+    frequency.spectralPurity < SPECTRAL_PURITY_MIN ||
+    frequency.snrDb < SNR_MARGINAL_DB) return null;
+  const regularity = interBeatRegularity(pulse, SAMPLE_RATE);
+  if (regularity < IBI_REGULARITY_MIN) return null;
+  const { bpm, snrDb, spectralPurity } = frequency;
+  if (chromaticFraction(paired, bpm) < 0.15) return null;
+
+  const lastSixSeconds = pulse.slice(-SAMPLE_RATE * 6);
+  const average = mean(lastSixSeconds);
+  const scale = Math.max(1e-9, std(lastSixSeconds));
+  return {
+    bpm: Math.round(bpm * 10) / 10,
+    snrDb: Math.round(snrDb * 10) / 10,
+    quality,
+    waveform: lastSixSeconds.map(value => (value - average) / scale),
+    risk: 45,
+    detail:
+      `Background-corrected forehead pulse estimate: ${Math.round(bpm)} BPM, ` +
+      `SNR ${snrDb.toFixed(1)} dB, spectral purity ${(spectralPurity * 100).toFixed(0)}%, ` +
+      `rhythm regularity ${(regularity * 100).toFixed(0)}%. ` +
+      `Experimental optical estimate; not proof of liveness.`
+  };
+}
+
 function evaluateSegment(
   valid: RGBSample[],
   qualityOverride?: PulseQuality
@@ -564,15 +619,19 @@ function evaluateSegment(
     );
   }
 
-  const greenFallback = (detail: string): PulseResult =>
-    evaluateGreenFallback(valid, quality) ?? unavailable(detail);
+  const alternative = (detail: string): PulseResult => {
+    const green = evaluateGreenFallback(valid, quality);
+    const corrected = evaluateBackgroundCorrected(valid, quality);
+    if (green && corrected) return green.risk! < corrected.risk! ? green : corrected;
+    return green ?? corrected ?? unavailable(detail);
+  };
 
   // Try POS first; independent green-only forehead sampling is a fallback for
   // webcams whose red/blue channels are noisy or whose POS projection cancels
   // a subtle but rhythmic real pulse.
   const greenVar = greenChannelVariance(valid);
   if (greenVar < GREEN_VARIANCE_FLOOR) {
-    return greenFallback(
+    return alternative(
       "No measurable skin-color rhythm was found. Improve front-facing light and retry."
     );
   }
@@ -581,26 +640,26 @@ function evaluateSegment(
   const pulse = extractPOS(uniform);
   const pulseAmplitude = std(pulse);
   if (pulseAmplitude < AMPLITUDE_FLOOR) {
-    return greenFallback(
+    return alternative(
       "Pulse signal is too weak to measure reliably. Improve front-facing light, hold still, and retry."
     );
   }
 
   const frequency = estimateFrequency(pulse);
   if (!frequency) {
-    return greenFallback("No measurable pulse-frequency peak was found.");
+    return alternative("No measurable pulse-frequency peak was found.");
   }
 
   const { bpm, snrDb, spectralPurity } = frequency;
   if (spectralPurity < SPECTRAL_PURITY_MIN || snrDb < SNR_MARGINAL_DB) {
-    return greenFallback(
+    return alternative(
       "Spectral energy is spread across all frequencies — no dominant pulse."
     );
   }
 
   const regularity = interBeatRegularity(pulse, SAMPLE_RATE);
   if (regularity < IBI_REGULARITY_MIN) {
-    return greenFallback(
+    return alternative(
       "Pulse rhythm is irregular — inter-beat intervals are inconsistent with a physiological heartbeat."
     );
   }
@@ -632,9 +691,9 @@ function evaluateSegment(
       `Not medical-grade or validated spoof detection.`
   };
 
-  const greenResult = evaluateGreenFallback(valid, quality);
-  return greenResult && greenResult.risk! < posResult.risk!
-    ? greenResult
+  const otherResult = alternative("");
+  return otherResult.risk !== null && otherResult.risk < posResult.risk!
+    ? otherResult
     : posResult;
 }
 
