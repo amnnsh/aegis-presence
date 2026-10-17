@@ -26,7 +26,7 @@ interface State {
   results: ChallengeResult[]; secondsLeft: number; hint: string; faceCount: number | null;
   device: DeviceEvidence | null; model: "idle" | "loading" | "ready" | "unavailable";
   modelError: string; error: string; result: DecisionResult | null; cue: CueDisplay; presenter: string; lightStep: number; colors: Stimulus[]; pulseSeconds: number; pulseFrames: number; pulseBpm: number | null; pulseWave: number[];
-  pulseStatus: "idle" | "passed" | "failed" | "skipped";
+  pulseStatus: "idle" | "passed" | "inconclusive" | "skipped";
   pulseDetail: string;
 }
 function initialState(): State {
@@ -243,7 +243,7 @@ export class Verification extends React.Component<Record<string, never>, State> 
     if (!engine || this.state.model !== "ready") {
       const detail = "Face model unavailable. Pulse evidence was not collected.";
       this.pulseSignal = noPulse(detail);
-      this.setState({ stage: "pulse-result", pulseStatus: "failed", pulseDetail: detail, pulseBpm: null, pulseWave: [] });
+      this.setState({ stage: "pulse-result", pulseStatus: "inconclusive", pulseDetail: detail, pulseBpm: null, pulseWave: [] });
       return;
     }
     this.clearTimer();
@@ -287,7 +287,7 @@ export class Verification extends React.Component<Record<string, never>, State> 
       { id: "pulse", risk: result.risk, provenance: "heuristic", detail: result.detail };
     if (result?.bpm != null && result?.snrDb != null) this.session?.record(2, "pulse_result", { bpm: result.bpm, snrDb: result.snrDb, usableSeconds: result.quality.usableSeconds, fps: result.quality.fps });
     const passed = !skipped && Boolean(result && result.bpm != null && result.risk !== null && result.risk <= 50);
-    const pulseStatus = skipped ? "skipped" : passed ? "passed" : "failed";
+    const pulseStatus = skipped ? "skipped" : passed ? "passed" : "inconclusive";
     const pulseDetail = skipped ? "User skipped pulse measurement. This check stays unavailable." : (emptyDetail ?? result?.detail ?? "No physiological pulse fluctuation was detected.");
     this.setState({
       stage: "pulse-result",
@@ -376,27 +376,27 @@ export class Verification extends React.Component<Record<string, never>, State> 
     if (s.stage === "pulse") return <div className="prompt-card"><span className="eyebrow">EXPERIMENTAL PHYSIOLOGICAL SIGNAL</span><h2>Hold still — reading your pulse</h2><p>Blood flow can subtly change facial skin color. This camera estimate is not medical-grade and cannot establish that a video is live.</p><p role="status">{s.pulseDetail || "Keep still under steady lighting while the camera collects an 18-second sample."}</p><div className="pulse-readout"><strong>{s.pulseBpm == null ? "Measuring..." : `${Math.round(s.pulseBpm)} BPM`}</strong><span className="mono">{s.pulseSeconds}s remaining</span></div><p className="microcopy" role="status">Camera samples: {s.pulseFrames} · {s.faceCount === 1 ? "Face tracked" : "Position one face in view"}</p><svg className="pulse-wave" viewBox="0 0 320 90" role="img" aria-label="Experimental pulse waveform">{s.pulseWave.length > 1 && <polyline fill="none" stroke="currentColor" strokeWidth="2" points={s.pulseWave.filter((_,i) => i % 3 === 0).map((v,i,a) => `${i * 320 / Math.max(1,a.length-1)},${45 - Math.max(-3,Math.min(3,v))*12}`).join(" ")} />}</svg><div className="prompt-actions"><button className="button button-secondary" onClick={() => void this.endPulse(true)}>Skip pulse check</button><button className="button button-text" onClick={this.cancel}>Cancel session</button></div></div>;
     if (s.stage === "pulse-result") {
       const isPass = s.pulseStatus === "passed";
-      const isFail = s.pulseStatus === "failed";
+      const isInconclusive = s.pulseStatus === "inconclusive";
       const isSkip = s.pulseStatus === "skipped";
       return <div className="prompt-card">
         <div className="prompt-heading">
           <span className="eyebrow">EXPERIMENTAL PHYSIOLOGICAL SIGNAL / RESULT</span>
-          <span className={`decision-badge ${isPass ? "decision-approve" : isFail ? "decision-reject" : "decision-step-up"}`}>
-            <span className={`dot ${isFail ? "dot-red" : isSkip ? "dot-amber" : ""}`} />
-            {isPass ? "Passed" : isFail ? "Failed" : "Skipped"}
+          <span className={`decision-badge ${isPass ? "decision-approve" : "decision-step-up"}`}>
+            <span className={`dot ${isInconclusive || isSkip ? "dot-amber" : ""}`} />
+            {isPass ? "Detected" : isInconclusive ? "Inconclusive" : "Skipped"}
           </span>
         </div>
-        <h2>{isPass ? `Pulse detected: ${Math.round(s.pulseBpm ?? 0)} BPM` : isSkip ? "Pulse check skipped" : "Pulse detection failed"}</h2>
+        <h2>{isPass ? `Pulse detected: ${Math.round(s.pulseBpm ?? 0)} BPM` : isSkip ? "Pulse check skipped" : "Could not measure a reliable pulse"}</h2>
         <p>{s.pulseDetail}</p>
         {s.pulseWave.length > 1 && <svg className="pulse-wave" viewBox="0 0 320 90" role="img" aria-label="Pulse waveform">{s.pulseWave.filter((_,i) => i % 3 === 0).length > 1 && <polyline fill="none" stroke="currentColor" strokeWidth="2" points={s.pulseWave.filter((_,i) => i % 3 === 0).map((v,i,a) => `${i * 320 / Math.max(1,a.length-1)},${45 - Math.max(-3,Math.min(3,v))*12}`).join(" ")} />}</svg>}
-        {isFail && <div className="notice notice-amber" role="alert"><Icon name="info" size={18} /><p><strong>Anti-spoofing check triggered:</strong> No physiological pulse fluctuation was detected. Static images, flat lighting, or excessive motion are rejected to ensure a live human presence.</p></div>}
-        {isPass && <div className="notice notice-blue" role="status"><Icon name="check" size={18} /><p><strong>Physiological signal verified:</strong> Rhythmic skin-color fluctuations and inter-beat intervals consistent with a live pulse were observed.</p></div>}
+        {isInconclusive && <div className="notice notice-amber" role="alert"><Icon name="info" size={18} /><p>The camera signal was inconclusive. Weak light, compression, and movement can hide a real pulse; this result does not identify a still image.</p></div>}
+        {isPass && <div className="notice notice-blue" role="status"><Icon name="check" size={18} /><p>Rhythmic skin-color changes consistent with a pulse were measured. A webcam pulse estimate alone cannot prove live presence.</p></div>}
         <div className="prompt-actions">
           <button className="button button-primary" onClick={this.continueAfterPulse}>{s.lightConsent ? "Continue to light check" : "See summary result"}<Icon name="arrow" size={18} /></button>
           <button className="button button-secondary" onClick={() => this.beginPulse()}><Icon name="refresh" size={16} />Retry pulse check</button>
           <button className="button button-text" onClick={this.cancel}>Stop camera</button>
         </div>
-        <p className="microcopy">Local rPPG is an experimental heuristic. A failure or skip contributes missing evidence toward a step-up decision.</p>
+        <p className="microcopy">Local rPPG is an experimental heuristic. An inconclusive or skipped check contributes missing evidence toward a step-up decision.</p>
       </div>;
     }
     if (s.stage === "reflection") return <div className="prompt-card"><div className="prompt-heading"><span className="eyebrow">OPTIONAL LIGHT RESPONSE</span><span className="mono microcopy">{s.lightStep + 1} / 6</span></div><h2>Keep still. Face the screen.</h2><p>Six slow full-screen color plateaus, 1.5 seconds each. A rough forehead and cheek color correlation is measured after each transition settles. This is not validated liveness.</p><div className="color-dots" aria-label={`Current color: ${s.colors[s.lightStep]?.name}`}>{s.colors.map((c, i) => <span key={i} style={{ background: c.hex }} className={i === s.lightStep ? "selected-color" : ""} />)}</div><div className="prompt-actions"><button className="button button-secondary" onClick={this.skipLight}>Skip light check</button><button className="button button-text" onClick={this.cancel}>Cancel session</button></div></div>;
