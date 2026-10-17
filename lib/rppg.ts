@@ -218,7 +218,7 @@ export function bandpassCardiac(
   return smooth5(smooth5(detrended));
 }
 
-/** POS: Plane-Orthogonal-to-Skin pulse extraction with outlier-window suppression and cardiac bandpass filtering. */
+/** POS: per-frame sliding 1.6 s windows, as used in rPPG-Toolbox. */
 export function extractPOS(samples: RGBSample[], fps = SAMPLE_RATE): number[] {
   const length = samples.length;
   const output = new Array<number>(length).fill(0);
@@ -227,7 +227,7 @@ export function extractPOS(samples: RGBSample[], fps = SAMPLE_RATE): number[] {
   const windowSize = Math.round(
     WINDOW_SECONDS * fps
   );
-  const stride = Math.max(1, Math.floor(windowSize / 2));
+  const stride = 1;
 
   if (length < windowSize) return output;
 
@@ -296,6 +296,41 @@ export function extractPOS(samples: RGBSample[], fps = SAMPLE_RATE): number[] {
   }
 
   return filtered;
+}
+
+/**
+ * Independent CHROM projection for a second view of the same skin signal.
+ * The equations are from de Haan and Jeanne's CHROM method; the windowed
+ * overlap-add implementation is written here for our numeric webcam samples.
+ */
+export function extractCHROM(samples: RGBSample[], fps = SAMPLE_RATE): number[] {
+  const size = Math.round(WINDOW_SECONDS * fps);
+  const sums = new Array<number>(samples.length).fill(0);
+  const weights = new Array<number>(samples.length).fill(0);
+  if (samples.length < size) return sums;
+
+  const stride = Math.max(1, Math.round(size / 2));
+  for (let start = 0; start + size <= samples.length; start += stride) {
+    const window = samples.slice(start, start + size);
+    const [r, g, b] = (["r", "g", "b"] as const).map(channel => {
+      const values = window.map(sample => sample[channel]);
+      const average = mean(values);
+      return values.map(value => value / Math.max(1e-9, average));
+    });
+    const x = r.map((value, i) => 3 * value - 2 * g[i]);
+    const y = r.map((value, i) => 1.5 * value + g[i] - 1.5 * b[i]);
+    const ratio = std(x) / Math.max(1e-9, std(y));
+    const chrom = x.map((value, i) => value - ratio * y[i]);
+    const baseline = mean(chrom);
+    for (let i = 0; i < size; i++) {
+      const taper = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (size - 1));
+      sums[start + i] += (chrom[i] - baseline) * taper;
+      weights[start + i] += taper;
+    }
+  }
+  return bandpassCardiac(
+    sums.map((value, i) => weights[i] > 0 ? value / weights[i] : 0), fps
+  );
 }
 
 /**
@@ -705,6 +740,83 @@ function evaluateRegionalConsensus(
   };
 }
 
+/** CHROM needs matching pulse evidence on both sides of the face. */
+function evaluateChromConsensus(
+  valid: RGBSample[],
+  quality: PulseQuality
+): PulseResult | null {
+  const count = valid.find(sample => (sample.regions?.length ?? 0) >= 3)
+    ?.regions?.length;
+  if (count !== 3 && count !== 5) return null;
+  const complete = valid.filter(sample =>
+    sample.regions?.length === count &&
+    sample.regions.every(region =>
+      [region.r, region.g, region.b].every(value => Number.isFinite(value) && value > 0)
+    )
+  );
+  if (complete.length < 2) return null;
+  const duration = (complete[complete.length - 1].t - complete[0].t) / 1000;
+  const fps = duration > 0 ? (complete.length - 1) / duration : 0;
+  if (duration < MIN_SECONDS || fps < 12) return null;
+  const rate = Math.min(SAMPLE_RATE, Math.round(fps));
+  const cheeks = count === 5 ? [1, 2, 3, 4] : [1, 2];
+  const patches = cheeks.map(index => {
+    const samples = resample(complete.map(sample => ({
+      t: sample.t,
+      ...sample.regions![index]
+    })), rate);
+    const pulse = extractCHROM(samples, rate);
+    return { pulse, frequency: estimateFrequency(pulse, rate), index };
+  });
+  const background = complete.every(sample =>
+    Number.isFinite(sample.gBackground) && (sample.gBackground ?? 0) > 0
+  ) ? resample(complete, rate) : [];
+  const backgroundMean = background.length
+    ? mean(background.map(sample => sample.gBackground!))
+    : 0;
+  const backgroundPulse = backgroundMean > 0
+    ? bandpassCardiac(background.map(sample => sample.gBackground! / backgroundMean), rate)
+    : [];
+  const backgroundPeak = estimateFrequency(backgroundPulse, rate);
+
+  for (const first of patches) {
+    const frequency = first.frequency;
+    if (!frequency || frequency.snrDb < SNR_MARGINAL_DB ||
+      frequency.spectralPurity < SPECTRAL_PURITY_MIN ||
+      std(first.pulse) < AMPLITUDE_FLOOR ||
+      interBeatRegularity(first.pulse, rate) < IBI_REGULARITY_MIN) continue;
+    for (const second of patches) {
+      if (first.index === second.index || first.index % 2 === second.index % 2 ||
+        !second.frequency || second.frequency.snrDb < SNR_MARGINAL_DB ||
+        Math.abs(frequency.bpm - second.frequency.bpm) > 7 ||
+        interBeatRegularity(second.pulse, rate) < IBI_REGULARITY_MIN) continue;
+      const a = spectralPhasor(first.pulse, rate, frequency.bpm);
+      const b = spectralPhasor(second.pulse, rate, frequency.bpm);
+      if (phaseDifference(a.phase, b.phase) > 0.75) continue;
+      if (backgroundPeak && backgroundPeak.snrDb >= 0 &&
+        Math.abs(backgroundPeak.bpm - frequency.bpm) <= 7) continue;
+      if (backgroundPulse.length) {
+        const light = spectralPhasor(backgroundPulse, rate, frequency.bpm);
+        if (light.amplitude >= 0.3 * a.amplitude &&
+          phaseDifference(light.phase, a.phase) <= 0.75) continue;
+      }
+      const tail = first.pulse.slice(-rate * 6);
+      const center = mean(tail);
+      const scale = Math.max(1e-9, std(tail));
+      return {
+        bpm: Math.round(frequency.bpm * 10) / 10,
+        snrDb: Math.round(Math.min(frequency.snrDb, second.frequency.snrDb) * 10) / 10,
+        quality,
+        waveform: tail.map(value => (value - center) / scale),
+        risk: 45,
+        detail: `CHROM pulse estimate agrees across both cheeks: ${Math.round(frequency.bpm)} BPM. ` +
+          `Experimental optical estimate; not proof of liveness.`
+      };
+    }
+  }
+  return null;
+}
+
 function spectralPhasor(signal: number[], fps: number, bpm: number): {
   amplitude: number;
   phase: number;
@@ -855,8 +967,9 @@ function evaluateSegment(
     const green = evaluateGreenFallback(valid, quality);
     const corrected = evaluateBackgroundCorrected(valid, quality);
     const regional = evaluateRegionalConsensus(valid, quality);
+    const chrom = evaluateChromConsensus(valid, quality);
     const cheekGreen = evaluateGreenPatchCoherence(valid, quality);
-    const candidates = [green, corrected, regional, cheekGreen].filter(
+    const candidates = [green, corrected, regional, chrom, cheekGreen].filter(
       (result): result is PulseResult => result !== null
     );
     return candidates.sort((a, b) => a.risk! - b.risk!)[0] ?? unavailable(detail);
