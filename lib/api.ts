@@ -1,5 +1,6 @@
 ﻿import type { Challenge, ChallengeResult, ClientEvent, Decision, DecisionResult, EventType, HeadMove, Plan, Signal } from "./types.ts";
 import { SIGNALS } from "./risk.ts";
+import type { AttackCheck } from "./types.ts";
 import { epochNow } from "./challenges.ts";
 
 /** Typed client for the optional Aegis backend (see /backend).
@@ -20,6 +21,7 @@ export interface ServerSignal { id: string; risk: number | null; provenance: Sig
 export interface CompleteResponse {
   session_id: string; decision: Decision; risk: number; coverage: number; mode: "live"; explanation: string;
   reasons: string[]; signals: ServerSignal[]; contributions: DecisionResult["contributions"]; policy_version: string; token: string;
+  attack_checks?: AttackCheck[];
 }
 export interface AdminSession {
   id: string; created_at: string; expires_at: string; status: string; plan_consumed: boolean; decision: Decision | null;
@@ -133,11 +135,12 @@ export function getPlan(sessionId: string): Promise<SessionStart> {
 export function postEvents(sessionId: string, events: ClientEvent[]): Promise<{ accepted: number }> {
   return request(`/api/sessions/${encodeURIComponent(sessionId)}/events`, { method: "POST", body: { events } });
 }
-export function complete(sessionId: string, signals: Signal[], challengeResults: ChallengeResult[]): Promise<CompleteResponse> {
+export function complete(sessionId: string, signals: Signal[], challengeResults: ChallengeResult[], attackChecks: AttackCheck[] = []): Promise<CompleteResponse> {
   const short = (text: string) => text.slice(0, 400);
   return request<CompleteResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/complete`, { method: "POST", body: {
     signals: signals.map(s => ({ id: s.id, risk: s.risk, provenance: s.provenance, detail: short(s.detail) })),
     challenge_results: challengeResults.map(r => ({ kind: r.kind, status: r.status, risk: r.risk, detail: short(r.detail) })),
+    attack_checks: attackChecks.map(check => ({ id: check.id, indicators: check.indicators.map(item => ({ id: item.id, ran: item.ran, fired: item.fired })) })),
   } });
 }
 export function cancelSession(sessionId: string): Promise<unknown> {
@@ -155,7 +158,7 @@ export function toDecisionResult(data: CompleteResponse): DecisionResult | null 
   if (!complete || !freshness || typeof freshness.risk !== "number") return null;
   return {
     decision: data.decision, risk: data.risk, mode: "live", coverage: data.coverage, explanation: String(data.explanation ?? ""),
-    reasons: data.reasons.map(String), signals, contributions: data.contributions,
+    reasons: data.reasons.map(String), signals, contributions: data.contributions, attackChecks: data.attack_checks ?? [],
     server: { sessionId: data.session_id, policyVersion: data.policy_version, token: data.token,
       freshness: { risk: freshness.risk, provenance: "server", detail: freshness.detail } },
   };
@@ -189,11 +192,11 @@ export class ServerSession {
     return this.sending;
   }
   /** Server-recomputed, signed result; null means "show the local result with the local-only badge". */
-  async complete(signals: Signal[], results: ChallengeResult[]): Promise<DecisionResult | null> {
+  async complete(signals: Signal[], results: ChallengeResult[], attackChecks: AttackCheck[] = []): Promise<DecisionResult | null> {
     if (this.closed) return null;
     await this.flush();
     this.closed = true;
-    try { return toDecisionResult(await complete(this.id, signals, results)); } catch { return null; }
+    try { return toDecisionResult(await complete(this.id, signals, results, attackChecks)); } catch { return null; }
   }
   cancel() {
     if (this.closed) return;

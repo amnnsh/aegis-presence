@@ -23,7 +23,7 @@ from fastapi import Depends, FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictFloat, StrictInt
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .config import (
@@ -34,6 +34,7 @@ from .config import (
     SESSION_TTL_MS,
     Settings,
 )
+from .attacks import apply_attack_policy, fuse_attack_checks
 from .db import ACTIVE, Database
 from .gemini_analyst import (
     GeminiAnalystError,
@@ -125,12 +126,24 @@ class ChallengeResultIn(_Strict):
     detail: str = Field(default="", max_length=400)
 
 
+class AttackIndicatorIn(_Strict):
+    id: str = Field(min_length=1, max_length=32)
+    ran: StrictBool
+    fired: StrictBool
+
+
+class AttackCheckIn(_Strict):
+    id: str = Field(min_length=1, max_length=32)
+    indicators: list[AttackIndicatorIn] = Field(max_length=12)
+
+
 class CompleteIn(_Strict):
     signals: list[SignalIn] = Field(max_length=16)
     challenge_results: list[ChallengeResultIn] = Field(
         default_factory=list,
         max_length=16,
     )
+    attack_checks: list[AttackCheckIn] = Field(default_factory=list, max_length=2)
 
 
 class LinkIn(_Strict):
@@ -781,8 +794,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             row["clock_offset_ms"],
         )
 
+        attack_checks = fuse_attack_checks([check.model_dump() for check in body.attack_checks])
         result = apply_freshness(
-            evaluate_risk(signals, "live"),
+            apply_attack_policy(evaluate_risk(signals, "live"), attack_checks),
             freshness,
         )
 

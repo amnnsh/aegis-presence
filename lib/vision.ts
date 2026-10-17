@@ -2,14 +2,16 @@
 import type { RGBSample } from "./rppg.ts";
 import type {
   DeviceEvidence,
+  CameraProbes,
+  FeedStats,
   FaceMetrics,
   Point
 } from "./types.ts";
 
 import { extractHeadPose } from "./head-pose.ts";
 import { lockCamera, unlockCamera } from "./reflection.ts";
-import { frameTimingStats, grayHash, summarizeCapabilities } from "./injection.ts";
-import type { FrameSample } from "./injection.ts";
+import { compareBackgroundPatches, dHash, detectLoop, frameTimingStats, frozenMedian, grayHash, hashDistance, nativeModeDecision, sensorResponseDecision, summarizeCapabilities } from "./injection.ts";
+import type { FrameSample, HashedFrame } from "./injection.ts";
 import type { CameraLockKey } from "./reflection.ts";
 
 type Detector = {
@@ -99,6 +101,18 @@ export class BrowserVision {
   private timingSamples: FrameSample[] | null = [];
   private timingCanvas: HTMLCanvasElement | null = null;
 
+  private feedFrames: HashedFrame[] = [];
+  private feedCanvas: HTMLCanvasElement | null = null;
+  private backgroundCanvas: HTMLCanvasElement | null = null;
+  private previousBackground: Uint8ClampedArray | null = null;
+  private previousBackgroundCorner = -1;
+  private previousFeedHash: Uint32Array | null = null;
+  private frozenHistogram = new Uint32Array(1001);
+  private frozenPairs = 0;
+  private faceCenter: { x: number; y: number } | null = null;
+  private modeProbeActive = false;
+  private sensorRestore: (() => Promise<void>) | null = null;
+
   // rPPG sampling state
   private pulseSamples: RGBSample[] | null = null;
   private pulseCanvas: HTMLCanvasElement | null = null;
@@ -123,6 +137,155 @@ export class BrowserVision {
   get videoTrack(): MediaStreamTrack | null {
     const track = this.stream?.getVideoTracks()[0] ?? null;
     return track?.readyState === "live" ? track : null;
+  }
+
+  private async restoreCameraMode(track: MediaStreamTrack): Promise<void> {
+    let restored = false;
+    try {
+      if (track.readyState === "live") { await track.applyConstraints({
+        width: { ideal: 640 }, height: { ideal: 480 },
+        frameRate: { ideal: 24, max: 30 }, resizeMode: "crop-and-scale"
+      } as MediaTrackConstraints); restored = true; }
+    } catch { /* A stopped or limited camera may reject restoration. */ }
+    if (restored) this.modeProbeActive = false;
+    if (this.metadata && track.readyState === "live") {
+      const settings = track.getSettings();
+      this.metadata.width = settings.width ?? null;
+      this.metadata.height = settings.height ?? null;
+      this.metadata.declaredFps = settings.frameRate ?? null;
+    }
+  }
+
+  /** A timeout cannot cancel applyConstraints; its late completion restores the camera again. */
+  private async applyProbeConstraints(track: MediaStreamTrack, constraints: MediaTrackConstraints,
+    timeoutMs: number, restore: () => Promise<void>): Promise<"accepted" | "rejected" | "timeout"> {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const operation = track.applyConstraints(constraints);
+    const result = await Promise.race<"accepted" | "rejected" | "timeout">([
+      operation.then(() => "accepted" as const, () => "rejected" as const),
+      new Promise(resolve => { timer = setTimeout(() => resolve("timeout"), timeoutMs); })
+    ]);
+    if (timer) clearTimeout(timer);
+    if (result === "timeout") operation.then(() => void restore(), () => void restore());
+    return result;
+  }
+
+  private async probeNativeModes(track: MediaStreamTrack, deadline: number) {
+    const unavailable = nativeModeDecision(0, 0);
+    if (/Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) ||
+      !(navigator.mediaDevices.getSupportedConstraints?.() as Record<string, unknown> | undefined)?.resizeMode) return unavailable;
+    let attempted = 0, supported = 0;
+    this.modeProbeActive = true;
+    const restore = () => this.restoreCameraMode(track);
+    try {
+      for (const [width, height] of [[320, 240], [640, 480], [1280, 720]]) {
+        if (this.cancelled || track.readyState !== "live" || performance.now() >= deadline - 100) break;
+        attempted++;
+        const result = await this.applyProbeConstraints(track,
+          { width: { exact: width }, height: { exact: height }, resizeMode: "none" } as MediaTrackConstraints,
+          Math.min(1500, Math.max(100, deadline - performance.now())), restore);
+        if (result === "timeout") break;
+        if (result === "accepted") {
+          const settings = track.getSettings();
+          if (settings.width === width && settings.height === height) supported++;
+        }
+      }
+    } finally { await restore(); }
+    return nativeModeDecision(attempted, supported);
+  }
+
+  private async readLumas(video: HTMLVideoElement, count: number, deadline: number): Promise<number[]> {
+    const values: number[] = [];
+    if (typeof video.requestVideoFrameCallback !== "function") return values;
+    const canvas = document.createElement("canvas"); canvas.width = 32; canvas.height = 24;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    if (!ctx) return values;
+    for (let sample = 0; sample < count && !this.cancelled; sample++) {
+      const remaining = deadline - performance.now();
+      if (remaining < 50) break;
+      const frameReady = await new Promise<boolean>(resolve => {
+        let id = 0;
+        const timer = setTimeout(() => { video.cancelVideoFrameCallback?.(id); resolve(false); }, Math.min(500, remaining));
+        id = video.requestVideoFrameCallback(() => { clearTimeout(timer); resolve(true); });
+      });
+      if (!frameReady || this.cancelled) break;
+      ctx.drawImage(video, 0, 0, 32, 24);
+      const rgba = ctx.getImageData(0, 0, 32, 24).data;
+      let sum = 0;
+      for (let i = 0; i < rgba.length; i += 4) sum += (77 * rgba[i] + 150 * rgba[i + 1] + 29 * rgba[i + 2]) / 256;
+      values.push(sum / (32 * 24));
+    }
+    return values;
+  }
+
+  private async probeSensorResponse(track: MediaStreamTrack, video: HTMLVideoElement, deadline: number) {
+    const unavailable = sensorResponseDecision(null, null, null, [], []);
+    if (this.cancelled || performance.now() >= deadline - 800 || typeof track.getCapabilities !== "function") return unavailable;
+    let capabilities: Record<string, unknown>;
+    try { capabilities = track.getCapabilities() as Record<string, unknown>; } catch { return unavailable; }
+    const settings = track.getSettings() as Record<string, unknown>;
+    const controls = ["brightness", "exposureCompensation", "exposureTime"] as const;
+    const control = controls.find(name => {
+      if (name === "exposureTime" && !(Array.isArray(capabilities.exposureMode) && capabilities.exposureMode.includes("manual"))) return false;
+      const range = capabilities[name] as { min?: number; max?: number } | undefined;
+      return range && Number.isFinite(range.min) && Number.isFinite(range.max) && range.max! > range.min! && typeof settings[name] === "number";
+    });
+    if (!control) return unavailable;
+    const range = capabilities[control] as { min: number; max: number; step?: number };
+    const original = settings[control] as number;
+    const target = Math.min(range.max, Math.max(range.min, original + 0.35 * (range.max - range.min)));
+    const requested = range.step && range.step > 0
+      ? Math.min(range.max, range.min + Math.round((target - range.min) / range.step) * range.step) : target;
+    if (requested === original) return unavailable;
+    const baseline = await this.readLumas(video, 4, deadline);
+    if (baseline.length < 4 || this.cancelled || performance.now() >= deadline - 600) return unavailable;
+    const originalMode = settings.exposureMode;
+    const restore = async () => {
+      try {
+        if (track.readyState === "live") await track.applyConstraints({ advanced: [{
+          [control]: original,
+          ...(control === "exposureTime" && typeof originalMode === "string" ? { exposureMode: originalMode } : {})
+        }] } as MediaTrackConstraints);
+      } catch { /* Another restoration attempt runs in stop(). */ }
+    };
+    this.sensorRestore = restore;
+    try {
+      const accepted = await this.applyProbeConstraints(track, { advanced: [{
+        [control]: requested,
+        ...(control === "exposureTime" ? { exposureMode: "manual" } : {})
+      }] } as MediaTrackConstraints, Math.min(1000, Math.max(100, deadline - performance.now())), restore);
+      if (accepted !== "accepted" || this.cancelled) return unavailable;
+      const actual = (track.getSettings() as Record<string, unknown>)[control];
+      if (typeof actual !== "number" || Math.abs(actual - requested) > 0.001) return unavailable;
+      await new Promise(resolve => setTimeout(resolve, Math.min(250, Math.max(0, deadline - performance.now()))));
+      const after = await this.readLumas(video, 6, deadline);
+      return sensorResponseDecision(control, requested, actual, baseline, after);
+    } finally {
+      await restore();
+      const restored = track.readyState === "live" &&
+        Math.abs(Number((track.getSettings() as Record<string, unknown>)[control]) - original) < 0.001;
+      if (restored && this.sensorRestore === restore) this.sensorRestore = null;
+    }
+  }
+
+  private async runHardwareProbes(track: MediaStreamTrack, video: HTMLVideoElement): Promise<void> {
+    const deadline = performance.now() + 3000;
+    let nativeModes = nativeModeDecision(0, 0);
+    let sensorResponse = sensorResponseDecision(null, null, null, [], []);
+    try {
+      nativeModes = await this.probeNativeModes(track, deadline);
+      sensorResponse = await this.probeSensorResponse(track, video, deadline);
+    } catch { /* Unsupported controls supply no evidence. */ }
+    if (this.cancelled || !this.metadata) return;
+    const probes: CameraProbes = { nativeModes, sensorResponse };
+    this.metadata.probes = probes;
+    this.callbacks.device({ ...this.metadata });
+  }
+
+  feedStats(): FeedStats {
+    const loop = detectLoop(this.feedFrames);
+    return { frames: this.feedFrames.length, loopFound: loop.loopFound, loopPeriodMs: loop.periodMs,
+      loopRunFrames: loop.runFrames, frozenIdenticalShare: frozenMedian(this.frozenHistogram), frozenPairs: this.frozenPairs };
   }
 
   /** Holds exposure and white balance where the camera supports it. Returns what was locked. */
@@ -387,7 +550,9 @@ export class BrowserVision {
       observedFps: null,
       capabilities,
       videoInputCount,
-      frameTiming: null
+      frameTiming: null,
+      probes: null,
+      feed: null
     };
 
     this.callbacks.device({ ...this.metadata });
@@ -398,9 +563,14 @@ export class BrowserVision {
 
     if (this.cancelled) return;
 
-    this.measureFrames();
-
     this.callbacks.model("loading");
+    await this.runHardwareProbes(track, video);
+    if (this.cancelled) return;
+
+    // Hardware mode changes are complete before the cadence baseline begins.
+    this.firstFrameAt = 0;
+    this.firstFrameNumber = 0;
+    this.measureFrames();
 
     try {
       const {
@@ -507,6 +677,8 @@ export class BrowserVision {
           this.sampleTiming(now, frame.mediaTime);
         }
 
+        this.sampleFeed(frame.mediaTime * 1000);
+
         if (this.pulseSamples) {
           this.samplePulse(now);
         }
@@ -540,6 +712,47 @@ export class BrowserVision {
         this.callbacks.device({ ...this.metadata });
       }
     }
+  }
+
+  /** One compact motion hash and one native-resolution corner patch per presented frame. */
+  private sampleFeed(mediaTimeMs: number): void {
+    const video = this.video;
+    if (!video || !Number.isFinite(mediaTimeMs) || video.videoWidth < 32 || video.videoHeight < 32) return;
+    this.feedCanvas ??= Object.assign(document.createElement("canvas"), { width: 17, height: 16 });
+    const hashCtx = this.feedCanvas.getContext("2d", { willReadFrequently: true });
+    if (!hashCtx) return;
+    hashCtx.drawImage(video, 0, 0, 17, 16);
+    const hash = dHash(hashCtx.getImageData(0, 0, 17, 16).data);
+    if (this.feedFrames.length < 4000) this.feedFrames.push({ t: mediaTimeMs, hash });
+
+    const w = video.videoWidth, h = video.videoHeight;
+    const corners = [[0, 0], [w - 32, 0], [0, h - 32], [w - 32, h - 32]];
+    let corner = 0;
+    if (this.faceCenter) {
+      let farthest = -Infinity;
+      for (let i = 0; i < corners.length; i++) {
+        const x = (corners[i][0] + 16) / w - this.faceCenter.x;
+        const y = (corners[i][1] + 16) / h - this.faceCenter.y;
+        const distance = x * x + y * y;
+        if (distance > farthest) { farthest = distance; corner = i; }
+      }
+    }
+    this.backgroundCanvas ??= Object.assign(document.createElement("canvas"), { width: 32, height: 32 });
+    const backgroundCtx = this.backgroundCanvas.getContext("2d", { willReadFrequently: true });
+    if (!backgroundCtx) return;
+    backgroundCtx.drawImage(video, corners[corner][0], corners[corner][1], 32, 32, 0, 0, 32, 32);
+    const patch = new Uint8ClampedArray(backgroundCtx.getImageData(0, 0, 32, 32).data);
+    if (this.previousBackground && this.previousBackgroundCorner === corner && this.previousFeedHash &&
+      hashDistance(this.previousFeedHash, hash) > 0) {
+      const compared = compareBackgroundPatches(this.previousBackground, patch);
+      if (compared.eligible && compared.identicalShare !== null) {
+        this.frozenPairs++;
+        this.frozenHistogram[Math.round(compared.identicalShare * 1000)]++;
+      }
+    }
+    this.previousBackground = patch;
+    this.previousBackgroundCorner = corner;
+    this.previousFeedHash = hash;
   }
 
   /**
@@ -593,6 +806,10 @@ export class BrowserVision {
           faceCount === 1
             ? result.faceLandmarks[0]
             : [];
+        this.faceCenter = points.length ? {
+          x: points.reduce((sum, point) => sum + point.x, 0) / points.length,
+          y: points.reduce((sum, point) => sum + point.y, 0) / points.length
+        } : null;
 
         // Preserve pulse sampling.
         this.pulseFaceCount = faceCount;
@@ -725,8 +942,13 @@ export class BrowserVision {
     // Restore automatic exposure first: some webcams keep manual mode in firmware after
     // the track closes. Bounded, so a slow driver only delays the camera light briefly.
     const tracks = this.stream?.getTracks() ?? [];
-    const restoring = this.locked.length
-      ? Promise.race([this.unlockAfterLight(), new Promise(resolve => setTimeout(resolve, 800))])
+    const videoTrack = this.videoTrack;
+    const restorers: Promise<unknown>[] = [];
+    if (this.locked.length) restorers.push(this.unlockAfterLight());
+    if (this.modeProbeActive && videoTrack) restorers.push(this.restoreCameraMode(videoTrack));
+    if (this.sensorRestore) restorers.push(this.sensorRestore());
+    const restoring = restorers.length
+      ? Promise.race([Promise.allSettled(restorers), new Promise(resolve => setTimeout(resolve, 800))])
       : null;
     const stopTracks = () => tracks.forEach(track => {
       track.removeEventListener(
@@ -752,6 +974,14 @@ export class BrowserVision {
     this.metadata = null;
     this.timingSamples = null;
     this.timingCanvas = null;
+    this.feedFrames = [];
+    this.feedCanvas = null;
+    this.backgroundCanvas = null;
+    this.previousBackground = null;
+    this.previousFeedHash = null;
+    this.frozenHistogram = new Uint32Array(1001);
+    this.frozenPairs = 0;
+    this.faceCenter = null;
 
     this.stopPulse();
   }
