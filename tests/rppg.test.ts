@@ -529,3 +529,55 @@ test("unrelated background changes cannot be subtracted into a pulse", () => {
   assert.equal(result.risk, null, result.detail);
 });
 
+function patchFixture(hasPulse: boolean): RGBSample[] {
+  const samples: RGBSample[] = [];
+  let seed = 472;
+  const random = () => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed / 4294967296 - 0.5;
+  };
+  for (let frame = 0; frame < 270; frame++) {
+    const t = frame * 1000 / 15;
+    const seconds = t / 1000;
+    const lamp = 1 + 0.025 * Math.sin(2 * Math.PI * 1.7 * seconds);
+    const beat = hasPulse ? Math.sin(2 * Math.PI * 1.23 * seconds) : 0;
+    const forehead = {
+      // Tracking a reflective forehead can inject much more color noise than
+      // the cheek patches; the pooled signal must not hide both clean cheeks.
+      r: 145 * lamp + random() * 8,
+      g: 118 * lamp + random() * 8,
+      b: 96 * lamp + random() * 8
+    };
+    const cheeks = [0, 1].map(() => ({
+      r: 145 * lamp - 0.12 * beat + random() * 0.2,
+      g: 118 * lamp - 0.70 * beat + random() * 0.2,
+      b: 96 * lamp - 0.05 * beat + random() * 0.2
+    }));
+    const regions = [forehead, ...cheeks];
+    const mix = (channel: "r" | "g" | "b") =>
+      0.8 * forehead[channel] +
+      0.1 * cheeks[0][channel] +
+      0.1 * cheeks[1][channel];
+    samples.push({
+      t,
+      r: mix("r"), g: mix("g"), b: mix("b"),
+      gForehead: forehead.g,
+      gBackground: 180 * lamp + random() * 0.2,
+      regions,
+      motion: false
+    });
+  }
+  return samples;
+}
+
+test("matching cheek patches recover a pulse obscured in the pooled face", () => {
+  const result = analyzePulse(patchFixture(true));
+  assert.ok(result.bpm !== null && Math.abs(result.bpm - 74) <= 5, result.detail);
+  assert.match(result.detail, /Matching pulse estimates in two face regions/);
+});
+
+test("matching face patches do not accept a still image under periodic lighting", () => {
+  const result = analyzePulse(patchFixture(false));
+  assert.equal(result.risk, null, result.detail);
+});
+
