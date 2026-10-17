@@ -103,7 +103,7 @@ export class BrowserVision {
   private pulseSamples: RGBSample[] | null = null;
   private pulseCanvas: HTMLCanvasElement | null = null;
   private pulsePoints: Point[] = [];
-  private pulseAnchors: { x: number; y: number; boxX: number; boxY: number }[] | null = null;
+  private pulseAnchors: { x: number; y: number; boxX: number; boxY: number; width: number; height: number }[] | null = null;
   private pulseFaceCount = 0;
   private pulseMotion = false;
   private previousNose: Point | null = null;
@@ -218,21 +218,28 @@ export class BrowserVision {
       }
     ];
 
-    const patchSize = 16;
-    const halfPatch = patchSize / 2;
+    // The linked detector uses a broad, fixed forehead ROI. A larger
+    // forehead patch yields a cleaner green trace; smaller cheek patches remain
+    // useful for the multi-channel POS estimate.
+    const widths = [32, 16, 16];
+    const heights = [24, 16, 16];
 
     if (!this.pulseAnchors || this.pulseAnchors.length !== rawRegions.length) {
-      this.pulseAnchors = rawRegions.map(point => {
-        const x = Math.max(0, Math.min(320 - patchSize, point.x * 320 - halfPatch));
-        const y = Math.max(0, Math.min(240 - patchSize, point.y * 240 - halfPatch));
-        return { x, y, boxX: Math.round(x), boxY: Math.round(y) };
+      this.pulseAnchors = rawRegions.map((point, index) => {
+        const width = widths[index];
+        const height = heights[index];
+        const x = Math.max(0, Math.min(320 - width, point.x * 320 - width / 2));
+        const y = Math.max(0, Math.min(240 - height, point.y * 240 - height / 2));
+        return {
+          x, y, boxX: Math.round(x), boxY: Math.round(y), width, height
+        };
       });
     } else {
       for (let i = 0; i < rawRegions.length; i++) {
         const point = rawRegions[i];
-        const targetX = Math.max(0, Math.min(320 - patchSize, point.x * 320 - halfPatch));
-        const targetY = Math.max(0, Math.min(240 - patchSize, point.y * 240 - halfPatch));
         const anchor = this.pulseAnchors[i];
+        const targetX = Math.max(0, Math.min(320 - anchor.width, point.x * 320 - anchor.width / 2));
+        const targetY = Math.max(0, Math.min(240 - anchor.height, point.y * 240 - anchor.height / 2));
         const distance = Math.hypot(targetX - anchor.x, targetY - anchor.y);
         const alpha = distance < 1.5 ? 0.08 : 0.35;
         anchor.x += (targetX - anchor.x) * alpha;
@@ -251,15 +258,20 @@ export class BrowserVision {
     let g = 0;
     let b = 0;
     let count = 0;
+    let foreheadGreen = 0;
+    let foreheadCount = 0;
 
-    for (const anchor of this.pulseAnchors) {
+    for (let region = 0; region < this.pulseAnchors.length; region++) {
+      const anchor = this.pulseAnchors[region];
       const pixels = ctx.getImageData(
         anchor.boxX,
         anchor.boxY,
-        patchSize,
-        patchSize
+        anchor.width,
+        anchor.height
       ).data;
 
+      let regionGreen = 0;
+      let regionCount = 0;
       for (let i = 0; i < pixels.length; i += 4) {
         const rr = pixels[i];
         const gg = pixels[i + 1];
@@ -276,6 +288,13 @@ export class BrowserVision {
         g += gg;
         b += bb;
         count++;
+        regionGreen += gg;
+        regionCount++;
+      }
+
+      if (region === 0) {
+        foreheadGreen = regionGreen;
+        foreheadCount = regionCount;
       }
     }
 
@@ -285,6 +304,7 @@ export class BrowserVision {
         r: r / count,
         g: g / count,
         b: b / count,
+        ...(foreheadCount > 0 ? { gForehead: foreheadGreen / foreheadCount } : {}),
         motion: this.pulseMotion
       });
     }
