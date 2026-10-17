@@ -167,7 +167,7 @@ export class BrowserVision {
         const video = this.video;
         if (!video || video.readyState < 2 || video.currentTime === this.pulseFallbackMediaTime) return;
         this.pulseFallbackMediaTime = video.currentTime;
-        this.samplePulse(video.currentTime * 1000);
+        this.samplePulse(performance.now());
       }, 33);
     }
   }
@@ -571,10 +571,9 @@ export class BrowserVision {
         }
 
         if (this.pulseSamples) {
-          // Use the captured frame's media timestamp. Callback scheduling is
-          // jittery while synchronous landmark inference blocks the main
-          // thread, and that jitter can spread a narrow pulse spectral peak.
-          this.samplePulse(frame.mediaTime * 1000);
+          // Some camera/browser combinations report mediaTime=0 for every
+          // frame. The callback's monotonic clock keeps capture duration valid.
+          this.samplePulse(now);
         }
 
         this.measureFrames();
