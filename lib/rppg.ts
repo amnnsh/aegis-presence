@@ -28,6 +28,18 @@ const LOW_HZ = 0.7;
 const HIGH_HZ = 3.0;
 const WINDOW_SECONDS = 1.6;
 
+/**
+ * Anti-spoofing thresholds.
+ * A still image (photo/printout) held in front of the camera lacks real
+ * blood-flow-driven skin-color oscillation. These checks reject such fakes.
+ */
+const SNR_CONFIDENT_DB = 5;       // raised from 3; noise on a photo can hit ~3 dB
+const SNR_MARGINAL_DB = 1;        // below this = no detectable pulse
+const GREEN_VARIANCE_FLOOR = 0.06; // minimum σ of normalized green channel
+const AMPLITUDE_FLOOR = 0.002;     // minimum σ of the POS pulse waveform
+const SPECTRAL_PURITY_MIN = 0.25;  // peak-band must carry ≥25 % of in-band power
+const IBI_REGULARITY_MIN = 0.65;   // min ratio of consistent inter-beat intervals
+
 function mean(values: number[]): number {
   return values.reduce((sum, v) => sum + v, 0) /
     Math.max(1, values.length);
@@ -144,7 +156,7 @@ export function extractPOS(samples: RGBSample[]): number[] {
 export function estimateFrequency(
   signal: number[],
   fps = SAMPLE_RATE
-): { bpm: number; snrDb: number } | null {
+): { bpm: number; snrDb: number; spectralPurity: number } | null {
   const n = signal.length;
   if (n < fps * MIN_SECONDS) return null;
 
@@ -201,12 +213,67 @@ export function estimateFrequency(
     totalPower - signalPower
   );
 
+  const spectralPurity = signalPower / totalPower;
+
   return {
     bpm: peak.hz * 60,
     snrDb: 10 * Math.log10(
       Math.max(1e-12, signalPower) / noisePower
-    )
+    ),
+    spectralPurity
   };
+}
+
+/**
+ * Check that the green channel has enough temporal variance.
+ * Real skin under blood flow produces measurable green-channel oscillation.
+ * A printed photo or static screen image has near-constant pixel values;
+ * any variance comes only from camera sensor noise, which is much smaller.
+ */
+function greenChannelVariance(samples: RGBSample[]): number {
+  if (samples.length < 2) return 0;
+  const greens = samples.map(s => s.g);
+  const avg = mean(greens);
+  if (avg < 1e-9) return 0;
+  // Normalized standard deviation (coefficient of variation)
+  return std(greens) / avg;
+}
+
+/**
+ * Count zero-crossings in the POS pulse waveform and check that
+ * the inter-beat intervals are regular (a real heartbeat is rhythmic;
+ * random noise peaks are not).
+ *
+ * Returns a regularity score between 0 and 1, where 1 means perfectly
+ * uniform intervals and 0 means chaotic/random.
+ */
+function interBeatRegularity(pulse: number[], fps: number): number {
+  // Find positive zero-crossings (rising edges)
+  const crossings: number[] = [];
+  for (let i = 1; i < pulse.length; i++) {
+    if (pulse[i - 1] <= 0 && pulse[i] > 0) {
+      crossings.push(i / fps); // time in seconds
+    }
+  }
+  if (crossings.length < 3) return 0;
+
+  // Compute inter-beat intervals
+  const intervals: number[] = [];
+  for (let i = 1; i < crossings.length; i++) {
+    intervals.push(crossings[i] - crossings[i - 1]);
+  }
+
+  // Reject if intervals are outside the physiological range (40-180 BPM)
+  const medianIBI = intervals.slice().sort((a, b) => a - b)[Math.floor(intervals.length / 2)];
+  if (medianIBI < 60 / 180 || medianIBI > 60 / 40) return 0;
+
+  // Check consistency: fraction of intervals within ±25% of the median
+  const tolerance = medianIBI * 0.25;
+  const consistent = intervals.filter(ibi =>
+    Math.abs(ibi - medianIBI) <= tolerance
+  ).length;
+
+  return consistent / intervals.length;
 }
 
 export function analyzePulse(samples: RGBSample[]): PulseResult {
@@ -250,8 +317,30 @@ export function analyzePulse(samples: RGBSample[]): PulseResult {
     );
   }
 
+  // Anti-spoof check 1: green channel temporal variance.
+  // A still image has near-zero variance; real skin has measurable oscillation.
+  const greenVar = greenChannelVariance(valid);
+  if (greenVar < GREEN_VARIANCE_FLOOR) {
+    return unavailable(
+      "Skin color variance too low — no physiological fluctuation detected. " +
+      "A live face is required."
+    );
+  }
+
   const uniform = resample(valid);
   const pulse = extractPOS(uniform);
+
+  // Anti-spoof check 2: POS waveform amplitude.
+  // The extracted pulse signal must have meaningful oscillation, not just
+  // sub-pixel sensor noise amplified by the POS algorithm.
+  const pulseAmplitude = std(pulse);
+  if (pulseAmplitude < AMPLITUDE_FLOOR) {
+    return unavailable(
+      "Pulse signal amplitude too weak — consistent with a static image. " +
+      "A live face is required."
+    );
+  }
+
   const frequency = estimateFrequency(pulse);
 
   if (!frequency) {
@@ -260,12 +349,35 @@ export function analyzePulse(samples: RGBSample[]): PulseResult {
     );
   }
 
-  const { bpm, snrDb } = frequency;
+  const { bpm, snrDb, spectralPurity } = frequency;
 
+  // Anti-spoof check 3: spectral purity.
+  // A real heartbeat concentrates energy at the pulse frequency and its
+  // harmonic. Camera noise on a photo spreads power across all frequencies.
+  if (spectralPurity < SPECTRAL_PURITY_MIN) {
+    return unavailable(
+      "Spectral energy is spread across all frequencies — no dominant pulse. " +
+      "This is consistent with sensor noise on a static image."
+    );
+  }
+
+  // Anti-spoof check 4: inter-beat interval regularity.
+  // A real heartbeat produces rhythmic, evenly-spaced peaks. Random noise
+  // from a still image produces irregularly spaced zero-crossings.
+  const regularity = interBeatRegularity(pulse, SAMPLE_RATE);
+  if (regularity < IBI_REGULARITY_MIN) {
+    return unavailable(
+      "Pulse rhythm is irregular — inter-beat intervals are inconsistent " +
+      "with a physiological heartbeat. A live face is required."
+    );
+  }
+
+  // Risk scoring with raised SNR thresholds.
   const risk =
-    snrDb >= 3 && bpm >= 45 && bpm <= 150
+    snrDb >= SNR_CONFIDENT_DB && bpm >= 45 && bpm <= 150 &&
+    spectralPurity >= SPECTRAL_PURITY_MIN && regularity >= IBI_REGULARITY_MIN
       ? 15
-      : snrDb >= 0
+      : snrDb >= SNR_MARGINAL_DB
         ? 45
         : 80;
 
@@ -284,7 +396,9 @@ export function analyzePulse(samples: RGBSample[]): PulseResult {
     detail:
       `Experimental skin-color pulse estimate: ` +
       `${Math.round(bpm)} BPM, ` +
-      `SNR ${snrDb.toFixed(1)} dB. ` +
+      `SNR ${snrDb.toFixed(1)} dB, ` +
+      `spectral purity ${(spectralPurity * 100).toFixed(0)}%, ` +
+      `rhythm regularity ${(regularity * 100).toFixed(0)}%. ` +
       `Not medical-grade or validated spoof detection.`
   };
 }
