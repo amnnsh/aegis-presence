@@ -7,6 +7,10 @@ import type {
 } from "./types.ts";
 
 import { extractHeadPose } from "./head-pose.ts";
+import { lockCamera, unlockCamera } from "./reflection.ts";
+import { frameTimingStats, grayHash, summarizeCapabilities } from "./injection.ts";
+import type { FrameSample } from "./injection.ts";
+import type { CameraLockKey } from "./reflection.ts";
 
 type Detector = {
   detectForVideo(
@@ -91,24 +95,51 @@ export class BrowserVision {
 
   private metadata: DeviceEvidence | null = null;
 
+  // Frame-timing sample for camera integrity: first ~3 s only, then one summary.
+  private timingSamples: FrameSample[] | null = [];
+  private timingCanvas: HTMLCanvasElement | null = null;
+
   // rPPG sampling state
   private pulseSamples: RGBSample[] | null = null;
   private pulseCanvas: HTMLCanvasElement | null = null;
   private pulsePoints: Point[] = [];
+  private pulseAnchors: { x: number; y: number; boxX: number; boxY: number }[] | null = null;
   private pulseFaceCount = 0;
   private pulseMotion = false;
   private previousNose: Point | null = null;
-
-  // Head-pose debugging
-  private lastPoseLog = 0;
-  private debugPose = false;
 
   // Inference performance
   private fast = false;
   private lastCost = 0;
 
+  // Exposure / white balance switched to manual for the light check.
+  private locked: CameraLockKey[] = [];
+
   constructor(callbacks: Callbacks) {
     this.callbacks = callbacks;
+  }
+
+  /** The live camera track, or null before start() and after stop(). */
+  get videoTrack(): MediaStreamTrack | null {
+    const track = this.stream?.getVideoTracks()[0] ?? null;
+    return track?.readyState === "live" ? track : null;
+  }
+
+  /** Holds exposure and white balance where the camera supports it. Returns what was locked. */
+  async lockForLight(): Promise<CameraLockKey[]> {
+    if (this.cancelled) return [];
+    const track = this.videoTrack;
+    const keys = await lockCamera(track);
+    if (this.cancelled) { await unlockCamera(track, keys); return []; }
+    this.locked = keys;
+    return keys;
+  }
+
+  /** Back to automatic exposure / white balance. Safe to call when nothing is locked. */
+  unlockAfterLight(): Promise<void> {
+    const keys = this.locked;
+    this.locked = [];
+    return unlockCamera(this.videoTrack, keys);
   }
 
   /**
@@ -121,6 +152,7 @@ export class BrowserVision {
     this.pulseCanvas.width = 320;
     this.pulseCanvas.height = 240;
 
+    this.pulseAnchors = null;
     this.previousNose = null;
     this.pulseMotion = false;
   }
@@ -134,6 +166,7 @@ export class BrowserVision {
     this.pulseSamples = null;
     this.pulseCanvas = null;
     this.pulsePoints = [];
+    this.pulseAnchors = null;
     this.previousNose = null;
     this.pulseMotion = false;
 
@@ -146,10 +179,7 @@ export class BrowserVision {
       : [];
   }
 
-  /**
-   * Sample forehead and cheek RGB values.
-   * The canvas is temporary and never stores video.
-   */
+  /** Sample stable forehead and cheek RGB regions without storing video. */
   private samplePulse(t: number): void {
     const canvas = this.pulseCanvas;
     const video = this.video;
@@ -173,36 +203,61 @@ export class BrowserVision {
 
     ctx.drawImage(video, 0, 0, 320, 240);
 
-    const regions = [
+    const rawRegions = [
       {
         x: (points[109].x + points[338].x) / 2,
         y: (points[10].y + points[9].y) / 2
       },
-      points[50],
-      points[280]
+      {
+        x: (points[50].x + (points[101]?.x ?? points[50].x)) / 2,
+        y: (points[50].y + (points[101]?.y ?? points[50].y)) / 2
+      },
+      {
+        x: (points[280].x + (points[330]?.x ?? points[280].x)) / 2,
+        y: (points[280].y + (points[330]?.y ?? points[280].y)) / 2
+      }
     ];
+
+    const patchSize = 16;
+    const halfPatch = patchSize / 2;
+
+    if (!this.pulseAnchors || this.pulseAnchors.length !== rawRegions.length) {
+      this.pulseAnchors = rawRegions.map(point => {
+        const x = Math.max(0, Math.min(320 - patchSize, point.x * 320 - halfPatch));
+        const y = Math.max(0, Math.min(240 - patchSize, point.y * 240 - halfPatch));
+        return { x, y, boxX: Math.round(x), boxY: Math.round(y) };
+      });
+    } else {
+      for (let i = 0; i < rawRegions.length; i++) {
+        const point = rawRegions[i];
+        const targetX = Math.max(0, Math.min(320 - patchSize, point.x * 320 - halfPatch));
+        const targetY = Math.max(0, Math.min(240 - patchSize, point.y * 240 - halfPatch));
+        const anchor = this.pulseAnchors[i];
+        const distance = Math.hypot(targetX - anchor.x, targetY - anchor.y);
+        const alpha = distance < 1.5 ? 0.08 : 0.35;
+        anchor.x += (targetX - anchor.x) * alpha;
+        anchor.y += (targetY - anchor.y) * alpha;
+
+        if (Math.abs(anchor.x - anchor.boxX) > 0.85) {
+          anchor.boxX = Math.round(anchor.x);
+        }
+        if (Math.abs(anchor.y - anchor.boxY) > 0.85) {
+          anchor.boxY = Math.round(anchor.y);
+        }
+      }
+    }
 
     let r = 0;
     let g = 0;
     let b = 0;
     let count = 0;
 
-    for (const pt of regions) {
-      const x = Math.max(
-        0,
-        Math.min(306, Math.round(pt.x * 320) - 7)
-      );
-
-      const y = Math.max(
-        0,
-        Math.min(226, Math.round(pt.y * 240) - 7)
-      );
-
+    for (const anchor of this.pulseAnchors) {
       const pixels = ctx.getImageData(
-        x,
-        y,
-        14,
-        14
+        anchor.boxX,
+        anchor.boxY,
+        patchSize,
+        patchSize
       ).data;
 
       for (let i = 0; i < pixels.length; i += 4) {
@@ -211,8 +266,8 @@ export class BrowserVision {
         const bb = pixels[i + 2];
 
         if (
-          Math.min(rr, gg, bb) < 12 ||
-          Math.max(rr, gg, bb) > 245
+          Math.min(rr, gg, bb) < 5 ||
+          Math.max(rr, gg, bb) > 250
         ) {
           continue;
         }
@@ -272,9 +327,6 @@ export class BrowserVision {
     }
 
     this.video = video;
-    this.debugPose =
-      new URLSearchParams(window.location.search)
-        .get("debug") === "1";
 
     document.addEventListener(
       "visibilitychange",
@@ -313,12 +365,29 @@ export class BrowserVision {
 
     const settings = track.getSettings();
 
+    // A count of video inputs only: deviceId and labels of other devices are never read.
+    const videoInputCount = await navigator.mediaDevices.enumerateDevices()
+      .then(devices => devices.filter(d => d.kind === "videoinput").length)
+      .catch(() => null);
+
+    if (this.cancelled) return;
+
+    let capabilities: DeviceEvidence["capabilities"] = null;
+    try {
+      capabilities = summarizeCapabilities(track.getCapabilities?.());
+    } catch {
+      capabilities = null;
+    }
+
     this.metadata = {
       label: track.label || "",
       width: settings.width ?? null,
       height: settings.height ?? null,
       declaredFps: settings.frameRate ?? null,
-      observedFps: null
+      observedFps: null,
+      capabilities,
+      videoInputCount,
+      frameTiming: null
     };
 
     this.callbacks.device({ ...this.metadata });
@@ -434,12 +503,43 @@ export class BrowserVision {
           this.lastDeviceAt = now;
         }
 
+        if (this.timingSamples) {
+          this.sampleTiming(now, frame.mediaTime);
+        }
+
         if (this.pulseSamples) {
           this.samplePulse(now);
         }
 
         this.measureFrames();
       });
+  }
+
+  /**
+   * Hash a 16x12 grayscale thumbnail of the current frame and record its media time.
+   * After ~3 s (at least 60 frames, at most 5 s) publish ONE summary through the device callback.
+   */
+  private sampleTiming(now: number, mediaTime: number): void {
+    const video = this.video;
+    const samples = this.timingSamples;
+    if (!video || !samples) return;
+
+    this.timingCanvas ??= Object.assign(document.createElement("canvas"), { width: 16, height: 12 });
+    const ctx = this.timingCanvas.getContext("2d", { willReadFrequently: true });
+    if (ctx && Number.isFinite(mediaTime)) {
+      ctx.drawImage(video, 0, 0, 16, 12);
+      samples.push({ mediaTimeMs: mediaTime * 1000, hash: grayHash(ctx.getImageData(0, 0, 16, 12).data) });
+    }
+
+    const elapsed = now - this.firstFrameAt;
+    if ((elapsed >= 3000 && samples.length >= 60) || elapsed >= 5000) {
+      this.timingSamples = null;
+      this.timingCanvas = null;
+      if (this.metadata) {
+        this.metadata.frameTiming = frameTimingStats(samples);
+        this.callbacks.device({ ...this.metadata });
+      }
+    }
   }
 
   /**
@@ -553,7 +653,8 @@ export class BrowserVision {
             );
         }
 
-        // New 3D head-pose extraction.
+        // 3D head pose in degrees from the 4x4 column-major transform.
+        // Shown live by the ?debug=1 overlay in components/verification.tsx.
         const matrix =
           result.facialTransformationMatrixes?.[0]?.data;
 
@@ -561,21 +662,6 @@ export class BrowserVision {
           faceCount === 1 && matrix
             ? extractHeadPose(matrix)
             : null;
-
-        // Debug logs only when ?debug=1.
-        if (
-          pose &&
-          this.debugPose &&
-          now - this.lastPoseLog > 500
-        ) {
-          this.lastPoseLog = now;
-
-          console.log("HEAD POSE:", {
-            yaw: pose.yawDeg.toFixed(1),
-            pitch: pose.pitchDeg.toFixed(1),
-            roll: pose.rollDeg.toFixed(1)
-          });
-        }
 
         // Publish measurements.
         this.callbacks.metrics({
@@ -636,13 +722,20 @@ export class BrowserVision {
       this.onPageHide
     );
 
-    this.stream?.getTracks().forEach(track => {
+    // Restore automatic exposure first: some webcams keep manual mode in firmware after
+    // the track closes. Bounded, so a slow driver only delays the camera light briefly.
+    const tracks = this.stream?.getTracks() ?? [];
+    const restoring = this.locked.length
+      ? Promise.race([this.unlockAfterLight(), new Promise(resolve => setTimeout(resolve, 800))])
+      : null;
+    const stopTracks = () => tracks.forEach(track => {
       track.removeEventListener(
         "ended",
         this.interrupt
       );
       track.stop();
     });
+    if (restoring) restoring.finally(stopTracks); else stopTracks();
 
     this.stream = null;
 
@@ -657,6 +750,8 @@ export class BrowserVision {
     this.detector = null;
 
     this.metadata = null;
+    this.timingSamples = null;
+    this.timingCanvas = null;
 
     this.stopPulse();
   }

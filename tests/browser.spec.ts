@@ -7,6 +7,15 @@ test("landing loads, explains limits, and fits the viewport", async ({ page }) =
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });
 
+test("the presenter label appears only on /verify/?demo=1", async ({ page }) => {
+  await page.goto("/verify/");
+  await expect(page.getByText("Presenter label (demo only, not used for scoring)")).toHaveCount(0);
+  await page.goto("/verify/?demo=1&presenter=phone%20replay");
+  const select = page.getByLabel("Presenter label (demo only, not used for scoring)");
+  await expect(select).toHaveValue("phone replay");
+  expect(await select.locator("option").allInnerTexts()).toEqual(["Not labeled", "genuine", "phone replay", "virtual camera", "face-swap", "other"]);
+});
+
 test("missing camera cannot approve", async ({ page }) => {
   await page.goto("/verify/");
   await expect(page.getByRole("button", { name: "Enable webcam", exact: true })).toBeDisabled();
@@ -36,6 +45,10 @@ test("all attack fixtures are labeled and produce deterministic decisions", asyn
 
 test("mock dashboard filters and opens evidence", async ({ page }) => {
   await page.goto("/admin/");
+  // No verification server in this build: sample data is forced on and labeled.
+  await expect(page.getByRole("button", { name: "Sample data" })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("button", { name: "Sample data" })).toBeDisabled();
+  await expect(page.locator(".dataset-badge")).toContainText("MOCK DATA");
   await page.getByRole("button", { name: "Reject", exact: true }).click();
   await expect(page.locator("tbody tr")).toHaveCount(4);
   await page.getByRole("textbox", { name: "Search mock attempt ID or scenario" }).fill("AX-1047");

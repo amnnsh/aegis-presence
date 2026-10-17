@@ -1,5 +1,6 @@
-import type { Challenge, ChallengeResult, Decision, DecisionResult, Signal } from "./types.ts";
+import type { Challenge, ChallengeResult, ClientEvent, Decision, DecisionResult, EventType, HeadMove, Plan, Signal } from "./types.ts";
 import { SIGNALS } from "./risk.ts";
+import { epochNow } from "./challenges.ts";
 
 /** Typed client for the optional Aegis backend (see /backend).
  * NEXT_PUBLIC_API_URL is a PUBLIC URL baked into the bundle. Never put a secret in a NEXT_PUBLIC_* variable.
@@ -10,20 +11,10 @@ const API_URL = (process.env.NEXT_PUBLIC_API_URL || "").trim().replace(/\/+$/, "
 const TIMEOUT_MS = 6000;
 export const apiConfigured = (): boolean => API_URL !== "";
 
-export type Move = "left" | "right" | "up" | "down";
-export type PlanChallenge =
-  | { id: string; kind: "head_sequence"; moves: Move[] }
-  | { id: string; kind: "cued_blink"; cue_offsets_ms: number[] }
-  | { id: string; kind: "digits"; digits: string };
-export interface Plan { challenges: PlanChallenge[]; pulse_hold_ms: number }
+export type Move = HeadMove;
+export type PlanChallenge = Challenge;
+export type { ClientEvent, EventType, Plan };
 export interface SessionStart { session_id: string; expires_at: string; server_now_ms: number; plan: Plan }
-export type EventType =
-  | "challenge_start"
-  | "cue"
-  | "response"
-  | "challenge_end"
-  | "pulse_result";
-export interface ClientEvent { challenge_id: string; type: EventType; client_ts_ms: number; payload: Record<string, number | string | boolean | null> }
 export interface ServerSignal { id: string; risk: number | null; provenance: Signal["provenance"]; detail: string }
 export interface CompleteResponse {
   session_id: string; decision: Decision; risk: number; coverage: number; mode: "live"; explanation: string;
@@ -35,6 +26,8 @@ export interface AdminSession {
   link_label: string | null; ua_family: string | null;
 }
 export interface AdminSessionDetail extends AdminSession {
+  plan?: Plan;
+  clock_offset_ms?: number | null;
   events: (ClientEvent & { id: number; server_ts_ms: number })[];
   result: Omit<CompleteResponse, "session_id" | "policy_version" | "token"> | null;
 }
@@ -72,30 +65,20 @@ export function parsePlan(value: unknown): Plan | null {
   const plan = value as Plan | null;
   if (!plan || !Array.isArray(plan.challenges) || plan.challenges.length !== 3 || !Number.isFinite(plan.pulse_hold_ms)) return null;
   const valid = plan.challenges.every(c => c && typeof c.id === "string" && c.id.length > 0 && c.id.length <= 64 && (
-    c.kind === "head_sequence" ? Array.isArray(c.moves) && c.moves.length > 0 && c.moves.every(m => MOVES.includes(m))
-      : c.kind === "cued_blink" ? Array.isArray(c.cue_offsets_ms) && c.cue_offsets_ms.every(n => Number.isFinite(n))
+    c.kind === "head_sequence" ? Array.isArray(c.moves) && c.moves.length > 0 && c.moves.length <= 6 && c.moves.every(m => MOVES.includes(m))
+      // Cues must fit inside the 25 s per-challenge timeout (1 s settle + offset + 1.5 s response window).
+      : c.kind === "cued_blink" ? Array.isArray(c.cue_offsets_ms) && c.cue_offsets_ms.length > 0 && c.cue_offsets_ms.length <= 6
+        && c.cue_offsets_ms.every(n => Number.isFinite(n) && n >= 0 && n <= 20000)
         : c.kind === "digits" && typeof c.digits === "string" && /^\d{4}$/.test(c.digits)));
   return valid && new Set(plan.challenges.map(c => c.kind)).size === 3 ? plan : null;
 }
 
-/** INTERIM mapping onto today's Challenge type, until lib/challenges.ts consumes the plan directly.
- * The server-chosen ORDER and DIGITS are honored. A head sequence collapses to its first left/right move
- * (up/down is not detectable yet), and blink cue offsets are not used, so no cue/response latencies are reported.
- */
-export function planToChallenges(plan: Plan): Challenge[] {
-  return plan.challenges.map((c): Challenge => {
-    if (c.kind === "head_sequence") return { kind: "head", direction: c.moves.find((m): m is "left" | "right" => m === "left" || m === "right") ?? "left" };
-    if (c.kind === "cued_blink") return { kind: "blink" };
-    return { kind: "digits", digits: c.digits };
-  });
-}
-
 export function createSession(presenterLabel?: string): Promise<SessionStart> {
-  return request<SessionStart>("/api/sessions", { method: "POST", body: { client_now_ms: Date.now(), ...(presenterLabel ? { presenter_label: presenterLabel.slice(0, 64) } : {}) } });
+  return request<SessionStart>("/api/sessions", { method: "POST", body: { client_now_ms: epochNow(), ...(presenterLabel ? { presenter_label: presenterLabel.slice(0, 64) } : {}) } });
 }
 /** Help-desk link flow: the plan of an agent-created session can be fetched exactly once. */
 export function getPlan(sessionId: string): Promise<SessionStart> {
-  return request<SessionStart>(`/api/sessions/${encodeURIComponent(sessionId)}/plan?client_now_ms=${Date.now()}`);
+  return request<SessionStart>(`/api/sessions/${encodeURIComponent(sessionId)}/plan?client_now_ms=${epochNow()}`);
 }
 export function postEvents(sessionId: string, events: ClientEvent[]): Promise<{ accepted: number }> {
   return request(`/api/sessions/${encodeURIComponent(sessionId)}/events`, { method: "POST", body: { events } });
@@ -136,13 +119,19 @@ export class ServerSession {
   private queue: ClientEvent[] = [];
   private sending: Promise<void> = Promise.resolve();
   private closed = false;
-  constructor(start: SessionStart, plan: Plan) { this.id = start.session_id; this.plan = plan; this.challenges = planToChallenges(plan); }
+  constructor(start: SessionStart, plan: Plan) { this.id = start.session_id; this.plan = plan; this.challenges = plan.challenges; }
 
   record(challengeIndex: number, type: EventType, payload: ClientEvent["payload"] = {}) {
     const challenge = this.plan.challenges[challengeIndex];
     if (!challenge || this.closed) return;
-    this.queue.push({ challenge_id: challenge.id, type, client_ts_ms: Date.now(), payload });
+    this.queue.push({ challenge_id: challenge.id, type, client_ts_ms: epochNow(), payload });
     if (type === "challenge_end") this.flush();
+  }
+  /** Queues a challenge's timed events (from its tracker) and posts them as one batch. */
+  post(events: ClientEvent[]) {
+    if (this.closed || events.length === 0) return;
+    this.queue.push(...events);
+    this.flush();
   }
   flush(): Promise<void> {
     const batch = this.queue.splice(0);
@@ -183,6 +172,8 @@ export async function openSession(options: { linkId?: string | null; presenterLa
 export const adminSessions = (token: string, limit = 100) => request<{ sessions: AdminSession[] }>(`/api/admin/sessions?limit=${limit}`, { token });
 export const adminSession = (token: string, id: string) => request<AdminSessionDetail>(`/api/admin/sessions/${encodeURIComponent(id)}`, { token });
 export const adminSummary = (token: string) => request<AdminSummary>("/api/admin/summary", { token });
+/** Reachability only; no token. Rejects when the server is down or not configured. */
+export const apiHealth = () => request<{ status: string; policy_version: string }>("/api/health");
 export const createLink = (token: string, label: string) => request<HelpDeskLink>("/api/links", { method: "POST", token, body: { label } });
 /** EventSource cannot send headers, so the stream is the one endpoint that takes the token as a query parameter. */
 export const adminStreamUrl = (token: string) => `${API_URL}/api/admin/stream?token=${encodeURIComponent(token)}`;
