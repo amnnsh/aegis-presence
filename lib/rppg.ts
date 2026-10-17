@@ -616,8 +616,8 @@ function evaluateRegionalConsensus(
   quality: PulseQuality
 ): PulseResult | null {
   const complete = valid.filter(sample =>
-    sample.regions?.length === 3 &&
-    sample.regions.every(region =>
+    (sample.regions?.length ?? 0) >= 3 &&
+    sample.regions!.slice(0, 3).every(region =>
       [region.r, region.g, region.b].every(value => Number.isFinite(value) && value > 0)
     ) && Number.isFinite(sample.gBackground) && (sample.gBackground ?? 0) > 0
   );
@@ -710,13 +710,18 @@ function phaseDifference(a: number, b: number): number {
   return Math.abs(Math.atan2(Math.sin(a - b), Math.cos(a - b)));
 }
 
-/** Recover a cheek-local green rhythm only when the other cheek corroborates it. */
+/** Recover a cheek-local green rhythm only when the opposite cheek corroborates it. */
 function evaluateGreenPatchCoherence(
   valid: RGBSample[],
   quality: PulseQuality
 ): PulseResult | null {
+  // Older traces have three regions. New captures add lower left and right
+  // cheeks, allowing a clean pair to survive glasses or localized glare.
+  const regionCount = valid.find(sample => (sample.regions?.length ?? 0) >= 3)
+    ?.regions?.length ?? 0;
+  if (regionCount !== 3 && regionCount !== 5) return null;
   const complete = valid.filter(sample =>
-    sample.regions?.length === 3 &&
+    sample.regions?.length === regionCount &&
     sample.regions.slice(1).every(region =>
       [region.r, region.g, region.b].every(value => Number.isFinite(value) && value > 0)
     ) && Number.isFinite(sample.gBackground) && (sample.gBackground ?? 0) > 0
@@ -733,57 +738,62 @@ function evaluateGreenPatchCoherence(
       ? bandpassCardiac(values.map(value => value / average), rate)
       : [];
   };
-  const cheekPulses = [1, 2].map(index =>
+  const cheekIndices = regionCount === 5 ? [1, 2, 3, 4] : [1, 2];
+  const cheekPulses = cheekIndices.map(index =>
     channelPulse(uniform.map(sample => sample.regions![index].g))
   );
   const backgroundPulse = channelPulse(uniform.map(sample => sample.gBackground!));
   const frequencies = cheekPulses.map(pulse => estimateFrequency(pulse, rate));
   const backgroundPeak = estimateFrequency(backgroundPulse, rate);
 
-  for (let primary = 0; primary < 2; primary++) {
-    const other = 1 - primary;
-    const frequency = frequencies[primary];
-    const otherFrequency = frequencies[other];
-    const pulse = cheekPulses[primary];
-    if (!frequency || !otherFrequency ||
-      std(pulse) < AMPLITUDE_FLOOR ||
-      frequency.snrDb < SNR_MARGINAL_DB ||
-      frequency.spectralPurity < 0.55 ||
-      interBeatRegularity(pulse, rate) < 0.6 ||
-      Math.abs(frequency.bpm - otherFrequency.bpm) > 7) continue;
+  const candidates: { result: PulseResult; snrDb: number }[] = [];
+  for (let primary = 0; primary < cheekIndices.length; primary++) {
+    for (let other = 0; other < cheekIndices.length; other++) {
+      if (primary === other || cheekIndices[primary] % 2 === cheekIndices[other] % 2) continue;
+      const frequency = frequencies[primary];
+      const otherFrequency = frequencies[other];
+      const pulse = cheekPulses[primary];
+      if (!frequency || !otherFrequency ||
+        std(pulse) < AMPLITUDE_FLOOR ||
+        frequency.snrDb < SNR_MARGINAL_DB ||
+        frequency.spectralPurity < 0.55 ||
+        interBeatRegularity(pulse, rate) < 0.6 ||
+        Math.abs(frequency.bpm - otherFrequency.bpm) > 7) continue;
 
-    const regionSamples = complete.map(sample => ({
-      t: sample.t,
-      ...sample.regions![primary + 1],
-      motion: sample.motion
-    }));
-    if (chromaticFraction(regionSamples, frequency.bpm, rate) < 0.3) continue;
+      const regionSamples = complete.map(sample => ({
+        t: sample.t,
+        ...sample.regions![cheekIndices[primary]],
+        motion: sample.motion
+      }));
+      if (chromaticFraction(regionSamples, frequency.bpm, rate) < 0.3) continue;
 
-    const face = spectralPhasor(pulse, rate, frequency.bpm);
-    const peer = spectralPhasor(cheekPulses[other], rate, frequency.bpm);
-    const background = spectralPhasor(backgroundPulse, rate, frequency.bpm);
-    if (face.amplitude < 1e-6 ||
-      peer.amplitude < 0.25 * face.amplitude ||
-      phaseDifference(face.phase, peer.phase) > 0.75) continue;
-    if (backgroundPeak && backgroundPeak.snrDb >= 0 &&
-      Math.abs(backgroundPeak.bpm - frequency.bpm) <= 7) continue;
-    if (background.amplitude >= 0.3 * face.amplitude &&
-      phaseDifference(face.phase, background.phase) <= 0.75) continue;
+      const face = spectralPhasor(pulse, rate, frequency.bpm);
+      const peer = spectralPhasor(cheekPulses[other], rate, frequency.bpm);
+      const background = spectralPhasor(backgroundPulse, rate, frequency.bpm);
+      if (face.amplitude < 1e-6 ||
+        peer.amplitude < 0.25 * face.amplitude ||
+        phaseDifference(face.phase, peer.phase) > 0.75) continue;
+      if (backgroundPeak && backgroundPeak.snrDb >= 0 &&
+        Math.abs(backgroundPeak.bpm - frequency.bpm) <= 7) continue;
+      if (background.amplitude >= 0.3 * face.amplitude &&
+        phaseDifference(face.phase, background.phase) <= 0.75) continue;
 
-    const tail = pulse.slice(-rate * 6);
-    const average = mean(tail);
-    const scale = Math.max(1e-9, std(tail));
-    return {
-      bpm: Math.round(frequency.bpm * 10) / 10,
-      snrDb: Math.round(frequency.snrDb * 10) / 10,
-      quality,
-      waveform: tail.map(value => (value - average) / scale),
-      risk: 45,
-      detail: `Matching green-channel rhythm in both cheeks: ${Math.round(frequency.bpm)} BPM, ` +
-        `SNR ${frequency.snrDb.toFixed(1)} dB. Experimental optical estimate; not proof of liveness.`
-    };
+      const tail = pulse.slice(-rate * 6);
+      const average = mean(tail);
+      const scale = Math.max(1e-9, std(tail));
+      const result: PulseResult = {
+        bpm: Math.round(frequency.bpm * 10) / 10,
+        snrDb: Math.round(frequency.snrDb * 10) / 10,
+        quality,
+        waveform: tail.map(value => (value - average) / scale),
+        risk: 45,
+        detail: `Matching green-channel rhythm in both cheeks: ${Math.round(frequency.bpm)} BPM, ` +
+          `SNR ${frequency.snrDb.toFixed(1)} dB. Experimental optical estimate; not proof of liveness.`
+      };
+      candidates.push({ result, snrDb: frequency.snrDb });
+    }
   }
-  return null;
+  return candidates.sort((a, b) => b.snrDb - a.snrDb)[0]?.result ?? null;
 }
 
 function evaluateSegment(
