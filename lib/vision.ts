@@ -277,6 +277,8 @@ export class BrowserVision {
     let count = 0;
     let foreheadGreen = 0;
     let foreheadCount = 0;
+    let backgroundGreen = 0;
+    let backgroundCount = 0;
 
     for (let region = 0; region < this.pulseAnchors.length; region++) {
       const anchor = this.pulseAnchors[region];
@@ -315,6 +317,29 @@ export class BrowserVision {
       }
     }
 
+    // A nearby patch outside the face records room/screen brightness changes.
+    // This is an optional reference; keep sampling even if the face fills the
+    // frame and there is no safe background patch.
+    const faceLeft = Math.min(points[234].x, points[454].x) * 320;
+    const faceRight = Math.max(points[234].x, points[454].x) * 320;
+    const patchWidth = 14;
+    const patchHeight = 20;
+    const patchY = Math.max(0, Math.min(240 - patchHeight,
+      Math.round(rawRegions[0].y * 240 - patchHeight / 2)));
+    const backgroundXs = [
+      Math.floor(faceLeft - patchWidth - 10),
+      Math.ceil(faceRight + 10)
+    ].filter(x => x >= 0 && x + patchWidth <= 320);
+    for (const x of backgroundXs) {
+      const pixels = ctx.getImageData(x, patchY, patchWidth, patchHeight).data;
+      for (let i = 0; i < pixels.length; i += 4) {
+        const rr = pixels[i], gg = pixels[i + 1], bb = pixels[i + 2];
+        if (Math.min(rr, gg, bb) < 5 || Math.max(rr, gg, bb) > 250) continue;
+        backgroundGreen += gg;
+        backgroundCount++;
+      }
+    }
+
     if (count > 0) {
       this.pulseSamples.push({
         t,
@@ -322,6 +347,7 @@ export class BrowserVision {
         g: g / count,
         b: b / count,
         ...(foreheadCount > 0 ? { gForehead: foreheadGreen / foreheadCount } : {}),
+        ...(backgroundCount > 0 ? { gBackground: backgroundGreen / backgroundCount } : {}),
         motion: this.pulseMotion
       });
     }
@@ -793,3 +819,4 @@ export class BrowserVision {
     this.stopPulse();
   }
 }
+
