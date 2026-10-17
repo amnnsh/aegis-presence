@@ -3,6 +3,8 @@ import test from "node:test";
 
 import {
   analyzePulse,
+  estimateFrequency,
+  extractCHROM,
   pulseLightingGuidance,
   previewPulse,
   resample,
@@ -162,6 +164,15 @@ test("synthetic 72 BPM pulse is recovered", () => {
     `Expected SNR >= 5 dB, got ${result.snrDb}`
   );
   assert.equal(result.risk, 15);
+});
+
+test("CHROM extraction recovers a colored optical rhythm", () => {
+  const samples = resample(generateSamples(12, 72), 30);
+  const frequency = estimateFrequency(extractCHROM(samples, 30), 30);
+  assert.ok(frequency);
+  assert.ok(Math.abs(frequency.bpm - 72) <= 4);
+  const flat = samples.map(sample => ({ ...sample, r: 120, g: 150, b: 100 }));
+  assert.equal(estimateFrequency(extractCHROM(flat, 30), 30), null);
 });
 
 test("realistic human webcam pulse with subtle physiological amplitude passes", () => {
@@ -725,6 +736,41 @@ test("camera capture records separate upper and lower cheek patches", () => {
   assert.equal(rectangles.length >= 5, true);
   assert.ok(rectangles[3].y > rectangles[1].y);
   assert.ok(rectangles[4].y > rectangles[2].y);
+});
+
+test("pulse skin boxes stay fixed across landmark jitter", () => {
+  const vision = new BrowserVision({
+    device: () => {}, metrics: () => {}, model: () => {}, interrupted: () => {}
+  });
+  const internals = vision as unknown as Record<string, unknown>;
+  const boxes: string[] = [];
+  const context = {
+    drawImage: () => {},
+    getImageData: (x: number, y: number, width: number, height: number) => {
+      boxes.push(`${x},${y},${width},${height}`);
+      const data = new Uint8ClampedArray(width * height * 4);
+      for (let i = 0; i < data.length; i += 4) {
+        data[i] = 145; data[i + 1] = 120; data[i + 2] = 100; data[i + 3] = 255;
+      }
+      return { data };
+    }
+  };
+  const points = Array.from({ length: 468 }, () => ({ x: 0.5, y: 0.5 }));
+  points[234] = { x: 0.3, y: 0.5 };
+  points[454] = { x: 0.7, y: 0.5 };
+  internals.video = {};
+  internals.pulseCanvas = { getContext: () => context };
+  internals.pulseSamples = [];
+  internals.pulseFaceCount = 1;
+  internals.pulsePoints = points;
+  (internals.samplePulse as (time: number) => void)(1000);
+  const first = boxes.slice(0, 5);
+  points[109] = { x: 0.504, y: 0.505 };
+  points[338] = { x: 0.504, y: 0.505 };
+  (internals.samplePulse as (time: number) => void)(1033);
+  assert.deepEqual(boxes.slice(7, 12), first);
+  const samples = internals.pulseSamples as RGBSample[];
+  assert.equal(samples[1].motion, false);
 });
 
 test("pulse capture uses the callback clock when camera mediaTime stays zero", () => {
