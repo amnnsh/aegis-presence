@@ -1,7 +1,7 @@
 "use client";
 import * as React from "react";
 import { analyzePulse, previewPulse, pulseLightingGuidance, type RGBSample } from "../lib/rppg.ts";
-import { BrowserVision, cameraError } from "../lib/vision.ts";
+import { BrowserVision, cameraError, type PulsePatchQuality } from "../lib/vision.ts";
 import { createPlan, createTracker, challengeTitle, challengeHint, livenessSignal } from "../lib/challenges.ts";
 import type { ChallengeTracker, CueDisplay } from "../lib/challenges.ts";
 import { describePose } from "../lib/head-pose.ts";
@@ -28,17 +28,20 @@ interface State {
   modelError: string; error: string; result: DecisionResult | null; cue: CueDisplay; presenter: string; lightStep: number; colors: Stimulus[]; pulseSeconds: number; pulseFrames: number; pulseBpm: number | null; pulseWave: number[];
   pulseStatus: "idle" | "passed" | "inconclusive" | "skipped";
   pulseDetail: string;
+  pulsePatches: PulsePatchQuality[]; pulseLock: CameraLockKey[];
+  cameras: { id: string; label: string }[]; cameraId: string;
 }
+const PULSE_CAPTURE_MS = 35_000;
 function initialState(): State {
   return { stage: "setup", tab: "live", consent: false, lightConsent: false, micConsent: false, mic: "off", scenario: "normal", sessionId: "",
     challenges: [], challengeIndex: 0, results: [], secondsLeft: 25, hint: "", faceCount: null,
-  device: null, model: "idle", modelError: "", error: "", result: null, cue: null, presenter: "", lightStep: 0, colors: [], pulseSeconds: 18, pulseFrames: 0, pulseBpm: null, pulseWave: [],
-    pulseStatus: "idle", pulseDetail: "" };
+  device: null, model: "idle", modelError: "", error: "", result: null, cue: null, presenter: "", lightStep: 0, colors: [], pulseSeconds: PULSE_CAPTURE_MS / 1000, pulseFrames: 0, pulseBpm: null, pulseWave: [],
+    pulseStatus: "idle", pulseDetail: "", pulsePatches: [], pulseLock: [], cameras: [], cameraId: "" };
 }
 const noReflection = (detail = "Screen-color check was not performed. Skipping is supported and never counts as a pass."): Signal => ({ id: "reflection", risk: null, provenance: "unavailable", detail });
 
 const noPulse = (detail = "Pulse measurement skipped or unavailable."): Signal => ({ id: "pulse", risk: null, provenance: "unavailable", detail });
-const PULSE_CAPTURE_HINT = "Face a soft light, keep bright lamps or windows behind the camera, and hold still for the full sample.";
+const PULSE_CAPTURE_HINT = "Face a soft light near the camera, keep bright lamps or windows out of the background, and hold still. If you move, restart this sample.";
 
 const noSync = (): Signal => ({ id: "sync", risk: null, provenance: "unavailable", detail: "Lip / voice timing was not measured: the microphone was off or denied, or the digits prompt did not finish. Nothing is simulated in its place." });
 
@@ -55,6 +58,7 @@ export class Verification extends React.Component<Record<string, never>, State> 
   private debug = false;
   private demo = false; // ?demo=1: the team labels its own test sessions
   private generation = 0;
+  private pulseRun = 0;
   private mounted = false;
   private deadline = 0;
   private lightStarted = 0;
@@ -76,14 +80,30 @@ export class Verification extends React.Component<Record<string, never>, State> 
     this.debug = params.get("debug") === "1";
     this.demo = params.get("demo") === "1";
     if (this.demo) this.setState({ presenter: presenterLabel(params.get("presenter")) });
+    void this.refreshCameras();
   }
+  private refreshCameras = async () => {
+    try {
+      const devices = await navigator.mediaDevices?.enumerateDevices();
+      if (!this.mounted || !devices) return;
+      this.setState({ cameras: devices.filter(device => device.kind === "videoinput" && device.deviceId)
+        .map((device, index) => ({ id: device.deviceId, label: device.label || `Camera ${index + 1}` })) });
+    } catch { /* camera selection remains optional */ }
+  };
+  private switchCamera = (cameraId: string) => {
+    if (this.state.stage !== "ready") return;
+    const { consent, lightConsent, micConsent, presenter, cameras, tab } = this.state;
+    this.session?.cancel(); this.session = null;
+    this.release();
+    this.setState({ ...initialState(), consent, lightConsent, micConsent, presenter, cameras, tab, cameraId }, this.startCamera);
+  };
   componentWillUnmount() { this.mounted = false; this.session?.cancel(); this.release(); }
   private clearTimer() {
     if (this.timer) clearInterval(this.timer); this.timer = null;
     if (this.advance) clearTimeout(this.advance); this.advance = null;
   }
   private release() {
-    this.generation++; this.clearTimer(); this.tracker = null;
+    this.generation++; this.pulseRun++; this.clearTimer(); this.tracker = null;
     this.speech?.cancel(); this.speech = null; this.finishing = false; this.digitMetrics = null;
     this.audio?.stop(); this.audio = null; this.sync = noSync();
     this.engine?.stop(); this.engine = null; this.samples = []; this.pulseSignal = noPulse(); this.pulseTrace = [];
@@ -124,7 +144,14 @@ export class Verification extends React.Component<Record<string, never>, State> 
         },
       });
       this.engine = engine;
-      engine.start(this.video).then(() => this.openMicrophone(current)).then(micNotice => opening.then(({ session, notice }) => {
+      engine.start(this.video, this.state.cameraId || undefined).then(() => {
+        if (current()) {
+          const cameraId = engine.videoTrack?.getSettings().deviceId;
+          if (cameraId) this.setState({ cameraId });
+          void this.refreshCameras();
+        }
+        return this.openMicrophone(current);
+      }).then(micNotice => opening.then(({ session, notice }) => {
         if (!current()) { session?.cancel(); return; }
         this.session = session;
         this.setState({ stage: "ready", error: notice || micNotice });
@@ -160,6 +187,20 @@ export class Verification extends React.Component<Record<string, never>, State> 
         for (const i of [1, 4, 33, 61, 93, 127, 133, 152, 172, 199, 234, 263, 291, 323, 356, 362, 397, 454]) {
           const point = m.points[i]; if (!point) continue;
           ctx.beginPath(); ctx.arc(point.x * this.overlay.width, point.y * this.overlay.height, 2.3, 0, Math.PI * 2); ctx.fill();
+        }
+        if (this.state.stage === "pulse") {
+          for (const patch of this.engine?.getPulsePatchQuality() ?? []) {
+            const x = patch.box.x * this.overlay.width / 320;
+            const y = patch.box.y * this.overlay.height / 240;
+            const width = patch.box.width * this.overlay.width / 320;
+            const height = patch.box.height * this.overlay.height / 240;
+            const poor = patch.usablePercent < 70;
+            ctx.fillStyle = poor ? "#e7a94444" : "#5bdab733";
+            ctx.strokeStyle = poor ? "#e7a944" : "#5bdab7";
+            ctx.lineWidth = 2;
+            ctx.fillRect(x, y, width, height);
+            ctx.strokeRect(x, y, width, height);
+          }
         }
       }
     }
@@ -249,36 +290,61 @@ export class Verification extends React.Component<Record<string, never>, State> 
       return;
     }
     this.clearTimer();
+    if (this.state.stage === "pulse") engine.stopPulse();
     this.pulseSignal = noPulse();
     this.pulseTrace = [];
-    engine.startPulse();
-    const started = performance.now();
+    const generation = this.generation;
+    const pulseRun = ++this.pulseRun;
     this.setState({
       stage: "pulse",
-      pulseSeconds: 18,
+      pulseSeconds: PULSE_CAPTURE_MS / 1000,
       pulseFrames: 0,
       pulseBpm: null,
       pulseWave: [],
       pulseStatus: "idle",
-      pulseDetail: PULSE_CAPTURE_HINT
+      pulseDetail: "Stabilizing camera exposure and white balance...",
+      pulsePatches: [],
+      pulseLock: []
+    }, () => {
+      if (!this.mounted || generation !== this.generation || pulseRun !== this.pulseRun || this.engine !== engine || this.state.stage !== "pulse") return;
+      let timeout: ReturnType<typeof setTimeout>;
+      const watchdog = new Promise<CameraLockKey[]>(resolve => {
+        timeout = setTimeout(() => resolve([]), 1500);
+      });
+      Promise.race([engine.lockForLight().catch(() => [] as CameraLockKey[]), watchdog]).then(keys => {
+        clearTimeout(timeout);
+        if (!this.mounted || generation !== this.generation || pulseRun !== this.pulseRun || this.engine !== engine || this.state.stage !== "pulse") return;
+        engine.startPulse();
+        const started = performance.now();
+        this.setState({ pulseDetail: PULSE_CAPTURE_HINT, pulseLock: keys });
+        this.timer = setInterval(() => {
+          if (this.state.stage !== "pulse" || this.engine !== engine) return;
+          const elapsed = performance.now() - started;
+          const seconds = Math.max(0, Math.ceil((PULSE_CAPTURE_MS - elapsed) / 1000));
+          const samples = engine.getPulseSamples();
+          const patches = engine.getPulsePatchQuality();
+          const recent = samples.filter(sample => sample.t >= (samples.at(-1)?.t ?? 0) - 3000);
+          const moving = recent.length >= 30 && recent.filter(sample => sample.motion).length / recent.length > 0.25;
+          const poorPatch = patches.some(patch => patch.usablePercent < 70);
+          const pulseDetail = this.state.faceCount !== 1 ? "Position one face in the camera view."
+            : moving ? "Your face moved away from the sampled skin areas. Press Restart pulse sample and hold still."
+              : poorPatch ? "A sampled skin area is clipped or too dark. Adjust the light or camera position, then restart."
+                : pulseLightingGuidance(samples) ?? PULSE_CAPTURE_HINT;
+          if (seconds !== this.state.pulseSeconds || samples.length !== this.state.pulseFrames || pulseDetail !== this.state.pulseDetail) {
+            this.setState({ pulseSeconds: seconds, pulseFrames: samples.length, pulseDetail, pulsePatches: patches });
+          }
+          if (elapsed >= 4000 && Math.floor(elapsed / 1000) !== Math.floor((elapsed - 250) / 1000)) {
+            const preview = previewPulse(samples);
+            this.setState({ pulseBpm: preview.bpm, pulseWave: preview.waveform });
+          }
+          if (elapsed >= PULSE_CAPTURE_MS) this.endPulse();
+        }, 250);
+      });
     });
-    this.timer = setInterval(() => {
-      const elapsed = performance.now() - started;
-      const seconds = Math.max(0, Math.ceil((18000 - elapsed) / 1000));
-      const samples = this.engine?.getPulseSamples() ?? [];
-      const pulseDetail = pulseLightingGuidance(samples) ?? PULSE_CAPTURE_HINT;
-      if (seconds !== this.state.pulseSeconds || samples.length !== this.state.pulseFrames || pulseDetail !== this.state.pulseDetail) {
-        this.setState({ pulseSeconds: seconds, pulseFrames: samples.length, pulseDetail });
-      }
-      if (elapsed >= 4000 && Math.floor(elapsed / 1000) !== Math.floor((elapsed - 250) / 1000)) {
-        const preview = previewPulse(samples);
-        this.setState({ pulseBpm: preview.bpm, pulseWave: preview.waveform });
-      }
-      if (elapsed >= 18000) this.endPulse();
-    }, 250);
   }
   private endPulse(skipped = false) {
     if (this.state.stage !== "pulse") return;
+    this.pulseRun++;
     this.clearTimer();
     const samples = this.engine?.stopPulse() ?? [];
     this.pulseTrace = samples;
@@ -363,6 +429,18 @@ export class Verification extends React.Component<Record<string, never>, State> 
       <button className="light-skip" autoFocus onClick={this.skipLight}>Skip light check</button>
     </div>;
   }
+  private renderCameraSelector() {
+    const s = this.state;
+    return <div className="camera-choice">
+      <label><span>Camera for this session</span><select value={s.cameraId} onChange={event => {
+        const cameraId = event.target.value;
+        if (s.stage === "ready") this.switchCamera(cameraId);
+        else this.setState({ cameraId });
+      }}><option value="">System default</option>{s.cameras.map(camera => <option key={camera.id} value={camera.id}>{camera.label}</option>)}</select></label>
+      <button className="button button-text" onClick={() => void this.refreshCameras()}>Refresh cameras</button>
+      <small>Connect a better webcam, refresh, then choose it before live challenges. Camera names and IDs stay in this tab.</small>
+    </div>;
+  }
   private finishLive = (reflection = noReflection()) => {
     // Local rPPG is an experimental heuristic, not a liveness guarantee.
     const signals: Signal[] = [inspectCamera(this.state.device), livenessSignal(this.state.results), reflection,
@@ -391,12 +469,22 @@ export class Verification extends React.Component<Record<string, never>, State> 
   };
   private renderPrompt() {
     const s = this.state;
-    if (s.stage === "setup") return <div className="prompt-card"><span className="eyebrow">BEFORE YOU BEGIN</span><h2>Your camera. Your control.</h2><p>Use a well-lit space and keep your face visible. The camera starts only after your permission. You can stop or skip a challenge at any time.</p><label className="consent"><input type="checkbox" checked={s.consent} onChange={e => this.setState({ consent: e.target.checked })} /><span>{apiConfigured() ? "I agree to temporary, on-device webcam processing for this demo. No image, video, or audio is recorded or uploaded; event timing and risk scores are sent to the verification server." : "I agree to temporary, on-device webcam processing for this demo. Nothing is recorded or uploaded."}</span></label><label className="consent light-consent"><input type="checkbox" checked={s.lightConsent} onChange={e => this.setState({ lightConsent: e.target.checked })} /><span>Also enable the optional slow screen-color check (the whole screen changes color six times).<small>Changing colors may cause discomfort. Leave this off for photosensitivity; skipping routes to step-up.</small></span></label><label className="consent light-consent"><input type="checkbox" checked={s.micConsent} onChange={e => this.setState({ micConsent: e.target.checked })} /><span>Use my microphone for the spoken-digit check (processed on this device, never uploaded).<small>Optional. Without it the digits prompt checks mouth motion only and lip / voice timing stays unavailable.</small></span></label>{this.demo && <label className="presenter-select"><span>Presenter label (demo only, not used for scoring)</span><select value={s.presenter} onChange={e => this.setState({ presenter: e.target.value })}><option value="">Not labeled</option>{PRESENTER_LABELS.map(label => <option key={label} value={label}>{label}</option>)}</select>{!apiConfigured() && <small>No verification server is configured, so the label is not sent anywhere.</small>}</label>}<div className="prompt-actions"><button className="button button-primary" disabled={!s.consent} onClick={this.startCamera}><Icon name="camera" size={18} />Enable webcam</button><button className="button button-text" onClick={() => this.finishLive()}>Continue without camera</button></div></div>;
+    if (s.stage === "setup") return <div className="prompt-card"><span className="eyebrow">BEFORE YOU BEGIN</span><h2>Your camera. Your control.</h2><p>Use a well-lit space and keep your face visible. The camera starts only after your permission. You can stop or skip a challenge at any time.</p><label className="consent"><input type="checkbox" checked={s.consent} onChange={e => this.setState({ consent: e.target.checked })} /><span>{apiConfigured() ? "I agree to temporary, on-device webcam processing for this demo. No image, video, or audio is recorded or uploaded; event timing and risk scores are sent to the verification server." : "I agree to temporary, on-device webcam processing for this demo. Nothing is recorded or uploaded."}</span></label><label className="consent light-consent"><input type="checkbox" checked={s.lightConsent} onChange={e => this.setState({ lightConsent: e.target.checked })} /><span>Also enable the optional slow screen-color check (the whole screen changes color six times).<small>Changing colors may cause discomfort. Leave this off for photosensitivity; skipping routes to step-up.</small></span></label><label className="consent light-consent"><input type="checkbox" checked={s.micConsent} onChange={e => this.setState({ micConsent: e.target.checked })} /><span>Use my microphone for the spoken-digit check (processed on this device, never uploaded).<small>Optional. Without it the digits prompt checks mouth motion only and lip / voice timing stays unavailable.</small></span></label>{this.demo && <label className="presenter-select"><span>Presenter label (demo only, not used for scoring)</span><select value={s.presenter} onChange={e => this.setState({ presenter: e.target.value })}><option value="">Not labeled</option>{PRESENTER_LABELS.map(label => <option key={label} value={label}>{label}</option>)}</select>{!apiConfigured() && <small>No verification server is configured, so the label is not sent anywhere.</small>}</label>}{this.renderCameraSelector()}<div className="prompt-actions"><button className="button button-primary" disabled={!s.consent} onClick={this.startCamera}><Icon name="camera" size={18} />Enable webcam</button><button className="button button-text" onClick={() => this.finishLive()}>Continue without camera</button></div></div>;
     if (s.stage === "preparing") return <div className="prompt-card"><span className="eyebrow">STARTING LOCALLY</span><h2>{s.device ? "Loading face landmarks" : "Waiting for camera permission"}</h2><p>{s.device ? "The model and WASM load from this site's own origin. No frames leave your browser." : "Choose Allow in your browser's camera prompt. A denied or unanswered request never becomes a pass."}</p><button className="button button-secondary" onClick={this.cancel}>Cancel and stop camera</button></div>;
-    if (s.stage === "ready") return <div className="prompt-card"><span className="eyebrow">{s.model === "ready" ? "CAMERA READY" : "LIMITED EVIDENCE"}</span><h2>{s.model === "ready" ? "A new challenge, every session." : "Landmarks are unavailable."}</h2><p>{s.model === "ready" ? "Follow three randomly ordered prompts. Head motion and blinks are local heuristics; " + (s.mic === "ready" ? "the spoken digits are transcribed and compared with your lip movement on this device." : "without the microphone, reading digits is only a mouth-motion demonstration.") + (s.lightConsent ? " For the light check, turn your screen brightness up now." : "") : "You can see a conservative result with the missing checks marked unavailable. Nothing is silently simulated."}</p><div className="prompt-actions"><button className="button button-primary" onClick={s.model === "ready" ? () => this.startChallenge() : () => this.finishLive()}>{s.model === "ready" ? "Begin live challenges" : "Get step-up result"}<Icon name="arrow" size={18} /></button><button className="button button-text" onClick={this.cancel}>Stop camera</button></div></div>;
+    if (s.stage === "ready") return <div className="prompt-card"><span className="eyebrow">{s.model === "ready" ? "CAMERA READY" : "LIMITED EVIDENCE"}</span><h2>{s.model === "ready" ? "A new challenge, every session." : "Landmarks are unavailable."}</h2><p>{s.model === "ready" ? "Follow three randomly ordered prompts. Head motion and blinks are local heuristics; " + (s.mic === "ready" ? "the spoken digits are transcribed and compared with your lip movement on this device." : "without the microphone, reading digits is only a mouth-motion demonstration.") + (s.lightConsent ? " For the light check, turn your screen brightness up now." : "") : "You can see a conservative result with the missing checks marked unavailable. Nothing is silently simulated."}</p>{this.renderCameraSelector()}<div className="prompt-actions"><button className="button button-primary" onClick={s.model === "ready" ? () => this.startChallenge() : () => this.finishLive()}>{s.model === "ready" ? "Begin live challenges" : "Get step-up result"}<Icon name="arrow" size={18} /></button><button className="button button-text" onClick={this.cancel}>Stop camera</button></div></div>;
     if (s.stage === "challenge") { const c = s.challenges[s.challengeIndex]; return <div className="prompt-card active-prompt"><div className="prompt-heading"><span className="eyebrow">CHALLENGE {s.challengeIndex + 1} OF 3</span><span className="countdown mono">{this.finishing ? "Checking audio" : `${s.secondsLeft}s remaining`}</span></div><h2>{challengeTitle(c)}</h2><p>{challengeHint(c, s.mic === "ready")}</p><div className="challenge-feedback" role="status"><span className={`dot ${s.faceCount === 1 ? "" : "dot-amber"}`} />{s.hint}</div><div className="prompt-actions"><button className="button button-secondary" onClick={this.skipChallenge}>Skip this challenge</button><button className="button button-text" onClick={this.cancel}>Cancel session</button></div><p className="microcopy">A skip or timeout means missing evidence, not fraud and not a pass.</p></div>; }
     if (s.stage === "between") { const last = s.results[s.results.length - 1]; const ok = last.status === "observed"; return <div className="prompt-card"><span className="eyebrow">CHALLENGE {s.challengeIndex + 1} / {ok ? "PASSED" : last.status === "partial" ? "PARTLY OBSERVED" : "MISSED"}</span><h2>{last.heard ? `Heard: ${last.heard.split("").join(" ")}` : last.kind === "digits" && last.heard === "" ? "No digits were heard." : ok ? "Observed." : last.status === "partial" ? "Partly observed." : "Missed. This check stays unavailable."}</h2><p>{last.detail}</p><div className="challenge-feedback" role="status"><span className="dot" />{s.challengeIndex < s.challenges.length - 1 ? "Next challenge starting..." : "Moving on to the pulse check..."}</div><div className="prompt-actions"><button className="button button-text" onClick={this.cancel}>Cancel session</button></div></div>; }
-    if (s.stage === "pulse") return <div className="prompt-card"><span className="eyebrow">EXPERIMENTAL PHYSIOLOGICAL SIGNAL</span><h2>Hold still — reading your pulse</h2><p>Blood flow can subtly change facial skin color. This camera estimate is not medical-grade and cannot establish that a video is live.</p><p role="status">{s.pulseDetail || "Face a soft light and keep still while the camera collects an 18-second sample."}</p><div className="pulse-readout"><strong>{s.pulseBpm == null ? "Measuring..." : `${Math.round(s.pulseBpm)} BPM`}</strong><span className="mono">{s.pulseSeconds}s remaining</span></div><p className="microcopy" role="status">Camera samples: {s.pulseFrames} · {s.faceCount === 1 ? "Face tracked" : "Position one face in view"}</p><svg className="pulse-wave" viewBox="0 0 320 90" role="img" aria-label="Experimental pulse waveform">{s.pulseWave.length > 1 && <polyline fill="none" stroke="currentColor" strokeWidth="2" points={s.pulseWave.filter((_,i) => i % 3 === 0).map((v,i,a) => `${i * 320 / Math.max(1,a.length-1)},${45 - Math.max(-3,Math.min(3,v))*12}`).join(" ")} />}</svg><div className="prompt-actions"><button className="button button-secondary" onClick={() => void this.endPulse(true)}>Skip pulse check</button><button className="button button-text" onClick={this.cancel}>Cancel session</button></div></div>;
+    if (s.stage === "pulse") return <div className="prompt-card">
+      <span className="eyebrow">EXPERIMENTAL PHYSIOLOGICAL SIGNAL</span>
+      <h2>Hold still — reading your pulse</h2>
+      <p>Face a soft light near the camera. The outlined boxes on the preview show exactly where skin color is sampled. This estimate is not medical-grade or proof of liveness.</p>
+      <p role="status">{s.pulseDetail || `Collecting a ${PULSE_CAPTURE_MS / 1000}-second sample.`}</p>
+      <div className="pulse-readout"><strong>{s.pulseBpm == null ? "Measuring..." : `${Math.round(s.pulseBpm)} BPM`}</strong><span className="mono">{s.pulseSeconds}s remaining</span></div>
+      <p className="microcopy" role="status">Camera samples: {s.pulseFrames} · {s.faceCount === 1 ? "Face tracked" : "Position one face in view"} · {s.pulseLock.length ? `Camera settings held: ${s.pulseLock.join(", ")}` : "Camera settings automatic or unconfirmed"}</p>
+      {s.pulsePatches.length > 0 && <div className="pulse-patch-quality" aria-label="Skin sample quality">{s.pulsePatches.map(patch => <div key={patch.label} className={patch.usablePercent < 70 ? "patch-poor" : ""}><strong>{patch.label}</strong><span>{patch.green == null ? "No usable pixels" : `Green ${Math.round(patch.green)} · ${patch.usablePercent}% usable pixels`}</span></div>)}</div>}
+      <svg className="pulse-wave" viewBox="0 0 320 90" role="img" aria-label="Experimental pulse waveform">{s.pulseWave.length > 1 && <polyline fill="none" stroke="currentColor" strokeWidth="2" points={s.pulseWave.filter((_,i) => i % 3 === 0).map((v,i,a) => `${i * 320 / Math.max(1,a.length-1)},${45 - Math.max(-3,Math.min(3,v))*12}`).join(" ")} />}</svg>
+      <div className="prompt-actions"><button className="button button-secondary" onClick={() => this.beginPulse()}><Icon name="refresh" size={16} />Restart pulse sample</button><button className="button button-secondary" onClick={() => void this.endPulse(true)}>Skip pulse check</button><button className="button button-text" onClick={this.cancel}>Cancel session</button></div>
+    </div>;
     if (s.stage === "pulse-result") {
       const isPass = s.pulseStatus === "passed";
       const isInconclusive = s.pulseStatus === "inconclusive";
@@ -461,7 +549,7 @@ export class Verification extends React.Component<Record<string, never>, State> 
       </section>
       <aside className="verification-sidebar"><section className="panel attack-panel"><div className="panel-heading"><span className="icon-box"><Icon name="code" size={18} /></span><div><h2>Attack simulation</h2><span className="microcopy">Predictable, fictional outcomes</span></div></div><fieldset disabled={active}><legend className="sr-only">Choose a simulated scenario</legend>{SCENARIOS.map(item => <label key={item.id} className={`scenario-option ${s.scenario === item.id && s.tab === "lab" ? "scenario-selected" : ""}`}><input type="radio" name="scenario" value={item.id} checked={s.scenario === item.id} onChange={() => this.setState({ scenario: item.id, tab: "lab" })} /><span><strong>{item.title}</strong><small>{item.description}</small></span></label>)}<button className="button button-secondary full-width" onClick={() => this.runSimulation()}><Icon name="play" size={15} />Run simulation</button></fieldset><p className="panel-footnote">{active ? "Stop the live session before switching scenarios." : "All five scores are simulated in this mode."}</p></section>
       <section className="panel signals-panel"><div className="section-heading"><h2>Signal stack</h2><span className="mono microcopy">5 LAYERS</span></div>{SIGNALS.map((signal, i) => <div className="readiness-row" key={signal.id}><Icon name={signalIcons[i]} size={17} /><div><strong>{signal.title}</strong><span>{i === 3 ? "Experimental / on-device" : i === 4 ? s.mic === "ready" ? "Microphone on / on-device" : s.mic === "blocked" ? "Microphone unavailable" : s.micConsent ? "Optional / enabled" : "Optional / microphone off" : i === 0 ? s.device ? "Metadata received" : "Waiting for camera" : i === 1 ? s.model === "ready" ? "Landmark engine ready" : "Waiting for landmarks" : s.lightConsent ? "Optional / enabled" : "Optional / off"}</span></div><span className={`readiness-dot ${i === 3 && s.model === "ready" ? "readiness-ready" : i === 0 && s.device || i === 1 && s.model === "ready" || i === 4 && s.mic === "ready" ? "readiness-ready" : ""}`} title="Local heuristic" /></div>)}<div className="signal-legend"><span><i className="readiness-dot readiness-ready" />Local heuristic</span><span><i className="readiness-dot readiness-mock" />Simulated</span></div></section>
-      {s.device && <section className="panel device-panel"><span className="eyebrow">OBSERVED CAMERA METADATA</span><dl><div><dt>Device label</dt><dd>{s.device.label || "Unavailable"}</dd></div><div><dt>Resolution</dt><dd>{s.device.width ?? "?"} &times; {s.device.height ?? "?"}</dd></div><div><dt>Reported cadence</dt><dd>{s.device.declaredFps?.toFixed(1) ?? "N/A"} fps</dd></div><div><dt>Observed cadence</dt><dd>{s.device.observedFps ?? "Sampling / unavailable"}{s.device.observedFps !== null ? " fps" : ""}</dd></div><div><dt>Camera controls</dt><dd>{describeControls(s.device)}</dd></div><div><dt>Frame timing</dt><dd>{describeFrameTiming(s.device.frameTiming)}</dd></div></dl><p className="microcopy">Labels, settings, and frame timing are spoofable. Cadence can vary with device load; only a count of cameras is read, and no device ID is collected.</p></section>}
+      {s.device && <section className="panel device-panel"><span className="eyebrow">OBSERVED CAMERA METADATA</span><dl><div><dt>Device label</dt><dd>{s.device.label || "Unavailable"}</dd></div><div><dt>Resolution</dt><dd>{s.device.width ?? "?"} &times; {s.device.height ?? "?"}</dd></div><div><dt>Reported cadence</dt><dd>{s.device.declaredFps?.toFixed(1) ?? "N/A"} fps</dd></div><div><dt>Observed cadence</dt><dd>{s.device.observedFps ?? "Sampling / unavailable"}{s.device.observedFps !== null ? " fps" : ""}</dd></div><div><dt>Camera controls</dt><dd>{describeControls(s.device)}</dd></div><div><dt>Frame timing</dt><dd>{describeFrameTiming(s.device.frameTiming)}</dd></div></dl><p className="microcopy">Labels, settings, and frame timing are spoofable. Cadence can vary with device load. Camera names and IDs are used locally for your camera choice; they are not added to verification evidence or uploaded.</p></section>}
       <PrivacyNote /></aside></div><PrototypeNotice /></>}
     </main><Footer />{s.stage === "reflection" && this.renderLightOverlay()}</>;
   }
