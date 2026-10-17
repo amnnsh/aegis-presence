@@ -552,6 +552,17 @@ function evaluateBackgroundCorrected(
   const foreheadMean = mean(uniform.map(sample => sample.gForehead!));
   const backgroundMean = mean(uniform.map(sample => sample.gBackground!));
   if (foreheadMean <= 0 || backgroundMean <= 0) return null;
+  const face = bandpassCardiac(uniform.map(sample => sample.gForehead! / foreheadMean));
+  const background = bandpassCardiac(uniform.map(sample => sample.gBackground! / backgroundMean));
+  const backgroundVariance = std(background) ** 2;
+  if (backgroundVariance < 1e-12) return null;
+  const covariance = mean(face.map((value, index) => value * background[index]));
+  const correlation = covariance / Math.max(1e-12, std(face) * std(background));
+
+  // A background patch only removes illumination if it actually follows the
+  // face's brightness changes. The two traces were anticorrelated in a real
+  // inconclusive capture; blindly subtracting them increased its noise.
+  if (correlation < 0.45) return null;
   const pulse = bandpassCardiac(uniform.map(sample =>
     sample.gForehead! / foreheadMean - sample.gBackground! / backgroundMean
   ));
@@ -725,6 +736,19 @@ export function analyzePulse(samples: RGBSample[]): PulseResult {
     }
   }
 
+  const paired = valid.filter(sample =>
+    Number.isFinite(sample.gForehead) && Number.isFinite(sample.gBackground)
+  );
+  if (paired.length >= 30) {
+    const faceMean = mean(paired.map(sample => sample.gForehead!));
+    const backgroundMean = mean(paired.map(sample => sample.gBackground!));
+    if (faceMean > 0 && backgroundMean / faceMean > 1.35) {
+      return {
+        ...primary,
+        detail: `${primary.detail} The area beside your face is much brighter than your forehead. Try a soft light in front of you and avoid bright lights behind you.`
+      };
+    }
+  }
   return primary;
 }
 
