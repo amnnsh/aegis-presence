@@ -262,7 +262,23 @@ export class Verification extends React.Component<Record<string, never>, State> 
 
     // Stable camera settings help preserve the tiny skin-color changes used by
     // rPPG. The lock is best-effort; unsupported cameras continue normally.
-    const locked = await engine.lockForLight();
+    let lockTimedOut = false;
+    let lockTimer: ReturnType<typeof setTimeout> | undefined;
+    const lockPromise = engine.lockForLight().catch(() => []);
+    const lockTimeout = new Promise<CameraLockKey[]>(resolve => {
+      lockTimer = setTimeout(() => {
+        lockTimedOut = true;
+        resolve([]);
+      }, 1000);
+    });
+    const locked = await Promise.race([lockPromise, lockTimeout]);
+    if (lockTimer) clearTimeout(lockTimer);
+
+    // Continue if a driver never acknowledges the constraint. If it resolves
+    // late, immediately restore automatic camera settings in the background.
+    if (lockTimedOut) {
+      void lockPromise.then(() => engine.unlockAfterLight()).catch(() => {});
+    }
     if (
       !this.mounted ||
       generation !== this.generation ||
@@ -270,7 +286,7 @@ export class Verification extends React.Component<Record<string, never>, State> 
       this.state.stage !== "pulse"
     ) {
       this.pulseStarting = false;
-      await engine.unlockAfterLight();
+      void engine.unlockAfterLight();
       return;
     }
 
@@ -299,7 +315,8 @@ export class Verification extends React.Component<Record<string, never>, State> 
     this.clearTimer();
     const engine = this.engine;
     const samples = engine?.stopPulse() ?? [];
-    await engine?.unlockAfterLight();
+    // Do not let a slow camera driver hold the result screen or next check.
+    void engine?.unlockAfterLight();
     if (!this.mounted || this.state.stage !== "pulse") return;
 
     const result = skipped ? null : analyzePulse(samples);
