@@ -518,3 +518,14 @@ test("background reference does not make flickering still images pass", () => {
   assert.equal(result.risk, null, result.detail);
 });
 
+test("unrelated background changes cannot be subtracted into a pulse", () => {
+  const samples = backgroundReferenceFixture(false).map(sample => ({
+    ...sample,
+    // A bright scene beside the face can move opposite to facial brightness
+    // as auto-exposure reacts. It is then not a valid illumination reference.
+    gBackground: 200 - sample.gBackground!
+  }));
+  const result = analyzePulse(samples);
+  assert.equal(result.risk, null, result.detail);
+});
+
