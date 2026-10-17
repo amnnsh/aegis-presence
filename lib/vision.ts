@@ -259,25 +259,19 @@ export class BrowserVision {
           x, y, boxX: Math.round(x), boxY: Math.round(y), width, height
         };
       });
-    } else {
-      for (let i = 0; i < rawRegions.length; i++) {
-        const point = rawRegions[i];
-        const anchor = this.pulseAnchors[i];
-        const targetX = Math.max(0, Math.min(320 - anchor.width, point.x * 320 - anchor.width / 2));
-        const targetY = Math.max(0, Math.min(240 - anchor.height, point.y * 240 - anchor.height / 2));
-        const distance = Math.hypot(targetX - anchor.x, targetY - anchor.y);
-        const alpha = distance < 1.5 ? 0.08 : 0.35;
-        anchor.x += (targetX - anchor.x) * alpha;
-        anchor.y += (targetY - anchor.y) * alpha;
-
-        if (Math.abs(anchor.x - anchor.boxX) > 0.85) {
-          anchor.boxX = Math.round(anchor.x);
-        }
-        if (Math.abs(anchor.y - anchor.boxY) > 0.85) {
-          anchor.boxY = Math.round(anchor.y);
-        }
-      }
     }
+
+    // Keep pixel boxes fixed for the measurement. Small landmark fluctuations
+    // otherwise move a box across textured skin and glasses, creating a
+    // false color rhythm much larger than the optical pulse. The toolbox's
+    // default unsupervised preprocessing also uses one face crop per clip.
+    // Mark appreciable displacement as motion so it cannot be scored as pulse.
+    const roiMoved = rawRegions.some((point, index) => {
+      const anchor = this.pulseAnchors![index];
+      const targetX = Math.max(0, Math.min(320 - anchor.width, point.x * 320 - anchor.width / 2));
+      const targetY = Math.max(0, Math.min(240 - anchor.height, point.y * 240 - anchor.height / 2));
+      return Math.hypot(targetX - anchor.x, targetY - anchor.y) > 4;
+    });
 
     let r = 0;
     let g = 0;
@@ -369,7 +363,7 @@ export class BrowserVision {
         ...(foreheadCount > 0 ? { gForehead: foreheadGreen / foreheadCount } : {}),
         ...(backgroundCount > 0 ? { gBackground: backgroundGreen / backgroundCount } : {}),
         ...(regions.length === this.pulseAnchors.length ? { regions } : {}),
-        motion: this.pulseMotion
+        motion: this.pulseMotion || roiMoved
       });
     }
   }
