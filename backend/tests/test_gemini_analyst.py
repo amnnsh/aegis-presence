@@ -11,8 +11,8 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
-from backend.app.analyst_schemas import AnalystReport
-from backend.app.gemini_analyst import (
+from app.analyst_schemas import AnalystReport
+from app.gemini_analyst import (
     GeminiAnalystError,
     generate_analyst_report,
     prepare_evidence,
