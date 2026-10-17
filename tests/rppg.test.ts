@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   analyzePulse,
+  pulseLightingGuidance,
   previewPulse,
   resample,
   type RGBSample
@@ -673,6 +674,18 @@ test("five-region sampling still rejects a flickering photo", () => {
   const result = analyzePulse(fiveRegionFixture("lit-photo"));
   assert.equal(result.risk, null, result.detail);
   assert.equal(result.bpm, null, result.detail);
+});
+
+test("backlighting is reported during capture and clears when face light improves", () => {
+  const samples = Array.from({ length: 50 }, (_, index): RGBSample => ({
+    t: index * 40,
+    r: 145, g: 120, b: 100,
+    gForehead: 110,
+    gBackground: 175
+  }));
+  assert.match(pulseLightingGuidance(samples) ?? "", /brighter than your forehead/);
+  for (const sample of samples) sample.gForehead = 145;
+  assert.equal(pulseLightingGuidance(samples), null);
 });
 
 test("camera capture records separate upper and lower cheek patches", () => {
