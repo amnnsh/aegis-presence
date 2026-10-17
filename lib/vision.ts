@@ -43,6 +43,15 @@ interface Callbacks {
   interrupted: (message: string) => void;
 }
 
+export interface PulsePatchQuality {
+  label: string;
+  green: number | null;
+  usablePercent: number;
+  box: { x: number; y: number; width: number; height: number };
+}
+
+const PULSE_PATCH_LABELS = ["Forehead", "Upper left cheek", "Upper right cheek", "Lower left cheek", "Lower right cheek"];
+
 export function cameraError(error: unknown): string {
   const name =
     error instanceof DOMException || error instanceof Error
@@ -106,6 +115,7 @@ export class BrowserVision {
   private pulseCanvas: HTMLCanvasElement | null = null;
   private pulsePoints: Point[] = [];
   private pulseAnchors: { x: number; y: number; boxX: number; boxY: number; width: number; height: number }[] | null = null;
+  private pulsePatchQuality: PulsePatchQuality[] = [];
   private pulseFaceCount = 0;
   private pulseMotion = false;
   private previousNose: Point | null = null;
@@ -149,6 +159,7 @@ export class BrowserVision {
    */
   startPulse(): void {
     this.pulseSamples = [];
+    this.pulsePatchQuality = [];
 
     this.pulseCanvas = document.createElement("canvas");
     this.pulseCanvas.width = 320;
@@ -184,6 +195,7 @@ export class BrowserVision {
     this.pulseCanvas = null;
     this.pulsePoints = [];
     this.pulseAnchors = null;
+    this.pulsePatchQuality = [];
     this.previousNose = null;
     this.pulseMotion = false;
 
@@ -194,6 +206,10 @@ export class BrowserVision {
     return this.pulseSamples
       ? [...this.pulseSamples]
       : [];
+  }
+
+  getPulsePatchQuality(): PulsePatchQuality[] {
+    return this.pulsePatchQuality.map(patch => ({ ...patch, box: { ...patch.box } }));
   }
 
   /** Sample stable forehead and cheek RGB regions without storing video. */
@@ -282,6 +298,7 @@ export class BrowserVision {
     let backgroundGreen = 0;
     let backgroundCount = 0;
     const regions: { r: number; g: number; b: number }[] = [];
+    const patchQuality: PulsePatchQuality[] = [];
 
     for (let region = 0; region < this.pulseAnchors.length; region++) {
       const anchor = this.pulseAnchors[region];
@@ -329,7 +346,14 @@ export class BrowserVision {
           b: regionBlue / regionCount
         });
       }
+      patchQuality.push({
+        label: PULSE_PATCH_LABELS[region],
+        green: regionCount > 0 ? regionGreen / regionCount : null,
+        usablePercent: Math.round(100 * regionCount / (anchor.width * anchor.height)),
+        box: { x: anchor.boxX, y: anchor.boxY, width: anchor.width, height: anchor.height }
+      });
     }
+    this.pulsePatchQuality = patchQuality;
 
     // A nearby patch outside the face records room/screen brightness changes.
     // This is an optional reference; keep sampling even if the face fills the
@@ -394,7 +418,7 @@ export class BrowserVision {
   /**
    * Request webcam access and initialize MediaPipe.
    */
-  async start(video: HTMLVideoElement): Promise<void> {
+  async start(video: HTMLVideoElement, deviceId?: string): Promise<void> {
     if (
       !window.isSecureContext ||
       !navigator.mediaDevices?.getUserMedia
@@ -420,7 +444,7 @@ export class BrowserVision {
       await navigator.mediaDevices.getUserMedia({
         audio: false,
         video: {
-          facingMode: "user",
+          ...(deviceId ? { deviceId: { exact: deviceId } } : { facingMode: "user" }),
           width: { ideal: 640 },
           height: { ideal: 480 },
           frameRate: { ideal: 30, max: 30 }
@@ -443,7 +467,8 @@ export class BrowserVision {
 
     const settings = track.getSettings();
 
-    // A count of video inputs only: deviceId and labels of other devices are never read.
+    // The integrity signal uses only a count. The local camera selector in the
+    // verification UI may read device names and IDs, but never uploads them.
     const videoInputCount = await navigator.mediaDevices.enumerateDevices()
       .then(devices => devices.filter(d => d.kind === "videoinput").length)
       .catch(() => null);
