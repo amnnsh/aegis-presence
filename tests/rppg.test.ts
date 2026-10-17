@@ -645,6 +645,75 @@ test("matching cheek brightness from a periodic lamp on a photo is rejected", ()
   assert.equal(result.bpm, null, result.detail);
 });
 
+function fiveRegionFixture(kind: "face" | "lit-photo"): RGBSample[] {
+  return noisyColorCheekFixture(kind).map(sample => {
+    const [forehead, lowerLeft, lowerRight] = sample.regions!;
+    const seconds = sample.t / 1000;
+    return {
+      ...sample,
+      regions: [
+        forehead,
+        { ...lowerLeft, g: 120 + 2 * Math.sin(2 * Math.PI * 1.85 * seconds) },
+        { ...lowerRight, g: 120 + 2 * Math.sin(2 * Math.PI * 2.1 * seconds) },
+        lowerLeft,
+        lowerRight
+      ]
+    };
+  });
+}
+
+test("lower cheek pair recovers a pulse when upper cheeks are obscured", () => {
+  const result = analyzePulse(fiveRegionFixture("face"));
+  assert.ok(result.bpm !== null && Math.abs(result.bpm - 69) < 4, result.detail);
+  assert.equal(result.risk, 45, result.detail);
+  assert.match(result.detail, /Matching green-channel rhythm in both cheeks/);
+});
+
+test("five-region sampling still rejects a flickering photo", () => {
+  const result = analyzePulse(fiveRegionFixture("lit-photo"));
+  assert.equal(result.risk, null, result.detail);
+  assert.equal(result.bpm, null, result.detail);
+});
+
+test("camera capture records separate upper and lower cheek patches", () => {
+  const vision = new BrowserVision({
+    device: () => {}, metrics: () => {}, model: () => {}, interrupted: () => {}
+  });
+  const internals = vision as unknown as Record<string, unknown>;
+  const rectangles: { x: number; y: number; width: number; height: number }[] = [];
+  const context = {
+    drawImage: () => {},
+    getImageData: (x: number, y: number, width: number, height: number) => {
+      rectangles.push({ x, y, width, height });
+      const data = new Uint8ClampedArray(width * height * 4);
+      for (let i = 0; i < data.length; i += 4) {
+        data[i] = 145; data[i + 1] = 120; data[i + 2] = 100; data[i + 3] = 255;
+      }
+      return { data };
+    }
+  };
+  const points = Array.from({ length: 468 }, () => ({ x: 0.5, y: 0.5 }));
+  points[234] = { x: 0.3, y: 0.5 };
+  points[454] = { x: 0.7, y: 0.5 };
+  points[50] = points[101] = { x: 0.4, y: 0.48 };
+  points[280] = points[330] = { x: 0.6, y: 0.48 };
+  points[205] = { x: 0.4, y: 0.62 };
+  points[425] = { x: 0.6, y: 0.62 };
+  internals.video = {};
+  internals.pulseCanvas = { getContext: () => context };
+  internals.pulseSamples = [];
+  internals.pulseFaceCount = 1;
+  internals.pulsePoints = points;
+  (internals.samplePulse as (time: number) => void)(1000);
+
+  const samples = internals.pulseSamples as RGBSample[];
+  assert.equal(samples.length, 1);
+  assert.equal(samples[0].regions?.length, 5);
+  assert.equal(rectangles.length >= 5, true);
+  assert.ok(rectangles[3].y > rectangles[1].y);
+  assert.ok(rectangles[4].y > rectangles[2].y);
+});
+
 test("pulse capture uses the callback clock when camera mediaTime stays zero", () => {
   const sampledAt: number[] = [];
   const callbacks: ((now: number, frame: { mediaTime: number; presentedFrames: number }) => void)[] = [];
