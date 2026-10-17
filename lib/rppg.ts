@@ -4,6 +4,8 @@ export interface RGBSample {
   g: number;
   b: number;
   motion?: boolean;
+  /** Green-channel mean from the tracked forehead patch, when available. */
+  gForehead?: number;
 }
 
 export interface PulseQuality {
@@ -424,6 +426,70 @@ function interBeatRegularity(pulse: number[], fps: number): number {
   return consistent / intervals.length;
 }
 
+function evaluateGreenFallback(
+  valid: RGBSample[],
+  quality: PulseQuality
+): PulseResult | null {
+  const forehead = valid.filter(
+    sample => Number.isFinite(sample.gForehead) && (sample.gForehead ?? 0) > 0
+  );
+  if (forehead.length < 2) return null;
+
+  const duration =
+    (forehead[forehead.length - 1].t - forehead[0].t) / 1000;
+  const fps = duration > 0 ? (forehead.length - 1) / duration : 0;
+  if (duration < MIN_SECONDS || fps < 12) return null;
+
+  const greenMean = mean(forehead.map(sample => sample.gForehead!));
+  if (greenMean < 1e-9) return null;
+
+  const greenSamples = forehead.map(sample => {
+    const green = sample.gForehead!;
+    return { ...sample, r: green, g: green, b: green };
+  });
+  const uniform = resample(greenSamples);
+  const pulse = bandpassCardiac(
+    uniform.map(sample => sample.g / greenMean),
+    SAMPLE_RATE
+  );
+  const amplitude = std(pulse);
+  if (amplitude < AMPLITUDE_FLOOR) return null;
+
+  const frequency = estimateFrequency(pulse);
+  if (
+    !frequency ||
+    frequency.spectralPurity < SPECTRAL_PURITY_MIN ||
+    frequency.snrDb < SNR_MARGINAL_DB
+  ) return null;
+
+  const regularity = interBeatRegularity(pulse, SAMPLE_RATE);
+  if (regularity < IBI_REGULARITY_MIN) return null;
+
+  const { bpm, snrDb, spectralPurity } = frequency;
+  const risk =
+    snrDb >= SNR_CONFIDENT_DB &&
+    spectralPurity >= SPECTRAL_PURITY_CONFIDENT &&
+    regularity >= IBI_REGULARITY_CONFIDENT
+      ? 15
+      : 45;
+
+  const lastSixSeconds = pulse.slice(-SAMPLE_RATE * 6);
+  const average = mean(lastSixSeconds);
+  const scale = Math.max(1e-9, std(lastSixSeconds));
+  return {
+    bpm: Math.round(bpm * 10) / 10,
+    snrDb: Math.round(snrDb * 10) / 10,
+    quality,
+    waveform: lastSixSeconds.map(value => (value - average) / scale),
+    risk,
+    detail:
+      `Forehead green-channel pulse estimate: ${Math.round(bpm)} BPM, ` +
+      `SNR ${snrDb.toFixed(1)} dB, spectral purity ${(spectralPurity * 100).toFixed(0)}%, ` +
+      `rhythm regularity ${(regularity * 100).toFixed(0)}%. ` +
+      `Experimental optical estimate; not medical-grade or proof of liveness.`
+  };
+}
+
 function evaluateSegment(
   valid: RGBSample[],
   qualityOverride?: PulseQuality
@@ -455,69 +521,53 @@ function evaluateSegment(
     detail
   });
 
-  if (
-    duration < MIN_SECONDS ||
-    fps < 12 ||
-    motionFraction > 0.35
-  ) {
+  if (duration < MIN_SECONDS || fps < 12 || motionFraction > 0.35) {
     return unavailable(
       "Insufficient stable facial video. Hold still and retry."
     );
   }
 
-  // Anti-spoof check 1: coherent green channel temporal variance.
+  const greenFallback = (detail: string): PulseResult =>
+    evaluateGreenFallback(valid, quality) ?? unavailable(detail);
+
+  // Try POS first; independent green-only forehead sampling is a fallback for
+  // webcams whose red/blue channels are noisy or whose POS projection cancels
+  // a subtle but rhythmic real pulse.
   const greenVar = greenChannelVariance(valid);
   if (greenVar < GREEN_VARIANCE_FLOOR) {
-    return unavailable(
-      "Skin color variance too low — no physiological fluctuation detected. " +
-      "A live face is required."
+    return greenFallback(
+      "Skin color variance too low — no physiological fluctuation detected. A live face is required."
     );
   }
 
   const uniform = resample(valid);
   const pulse = extractPOS(uniform);
-
-  // Anti-spoof check 2: bandpass-filtered POS waveform amplitude.
   const pulseAmplitude = std(pulse);
   if (pulseAmplitude < AMPLITUDE_FLOOR) {
-    return unavailable(
-      "Pulse signal amplitude too weak — consistent with a static image. " +
-      "A live face is required."
+    return greenFallback(
+      "Pulse signal amplitude too weak — consistent with a static image. A live face is required."
     );
   }
 
   const frequency = estimateFrequency(pulse);
-
   if (!frequency) {
-    return unavailable(
-      "No measurable pulse-frequency peak was found."
-    );
+    return greenFallback("No measurable pulse-frequency peak was found.");
   }
 
   const { bpm, snrDb, spectralPurity } = frequency;
-
-  // Anti-spoof check 3: spectral purity.
-  // A real heartbeat concentrates energy at the pulse frequency and its
-  // harmonic. Camera noise on a photo spreads power across all frequencies.
   if (spectralPurity < SPECTRAL_PURITY_MIN || snrDb < SNR_MARGINAL_DB) {
-    return unavailable(
-      "Spectral energy is spread across all frequencies — no dominant pulse. " +
-      "This is consistent with sensor noise on a static image."
+    return greenFallback(
+      "Spectral energy is spread across all frequencies — no dominant pulse."
     );
   }
 
-  // Anti-spoof check 4: inter-beat interval regularity.
-  // A real heartbeat produces rhythmic, evenly-spaced peaks. Random noise
-  // from a still image produces irregularly spaced zero-crossings.
   const regularity = interBeatRegularity(pulse, SAMPLE_RATE);
   if (regularity < IBI_REGULARITY_MIN) {
-    return unavailable(
-      "Pulse rhythm is irregular — inter-beat intervals are inconsistent " +
-      "with a physiological heartbeat. A live face is required."
+    return greenFallback(
+      "Pulse rhythm is irregular — inter-beat intervals are inconsistent with a physiological heartbeat."
     );
   }
 
-  // Risk scoring with raised SNR thresholds.
   const risk =
     snrDb >= SNR_CONFIDENT_DB &&
     bpm >= 45 &&
@@ -532,23 +582,23 @@ function evaluateSegment(
   const lastSixSeconds = pulse.slice(-SAMPLE_RATE * 6);
   const average = mean(lastSixSeconds);
   const scale = Math.max(1e-9, std(lastSixSeconds));
-
-  return {
+  const posResult: PulseResult = {
     bpm: Math.round(bpm * 10) / 10,
     snrDb: Math.round(snrDb * 10) / 10,
     quality,
-    waveform: lastSixSeconds.map(v =>
-      (v - average) / scale
-    ),
+    waveform: lastSixSeconds.map(value => (value - average) / scale),
     risk,
     detail:
-      `Experimental skin-color pulse estimate: ` +
-      `${Math.round(bpm)} BPM, ` +
-      `SNR ${snrDb.toFixed(1)} dB, ` +
-      `spectral purity ${(spectralPurity * 100).toFixed(0)}%, ` +
+      `Experimental skin-color pulse estimate: ${Math.round(bpm)} BPM, ` +
+      `SNR ${snrDb.toFixed(1)} dB, spectral purity ${(spectralPurity * 100).toFixed(0)}%, ` +
       `rhythm regularity ${(regularity * 100).toFixed(0)}%. ` +
       `Not medical-grade or validated spoof detection.`
   };
+
+  const greenResult = evaluateGreenFallback(valid, quality);
+  return greenResult && greenResult.risk! < posResult.risk!
+    ? greenResult
+    : posResult;
 }
 
 export function analyzePulse(samples: RGBSample[]): PulseResult {
