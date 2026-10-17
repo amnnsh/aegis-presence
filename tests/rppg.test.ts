@@ -7,6 +7,7 @@ import {
   resample,
   type RGBSample
 } from "../lib/rppg.ts";
+import { BrowserVision } from "../lib/vision.ts";
 
 /**
  * Generate synthetic facial RGB measurements.
@@ -579,5 +580,31 @@ test("matching cheek patches recover a pulse obscured in the pooled face", () =>
 test("matching face patches do not accept a still image under periodic lighting", () => {
   const result = analyzePulse(patchFixture(false));
   assert.equal(result.risk, null, result.detail);
+});
+
+test("pulse capture uses the callback clock when camera mediaTime stays zero", () => {
+  const sampledAt: number[] = [];
+  let onFrame: ((now: number, frame: { mediaTime: number; presentedFrames: number }) => void) | null = null;
+  const vision = new BrowserVision({
+    device: () => {}, metrics: () => {}, model: () => {}, interrupted: () => {}
+  });
+  const internals = vision as unknown as Record<string, unknown>;
+  internals.video = {
+    requestVideoFrameCallback: (callback: typeof onFrame) => {
+      onFrame = callback;
+      return 1;
+    }
+  };
+  internals.timingSamples = null;
+  internals.pulseSamples = [];
+  internals.samplePulse = (t: number) => sampledAt.push(t);
+  (internals.measureFrames as () => void)();
+  const first = onFrame;
+  assert.ok(first);
+  first(32150, { mediaTime: 0, presentedFrames: 1 });
+  const second = onFrame;
+  assert.ok(second);
+  second(32217, { mediaTime: 0, presentedFrames: 2 });
+  assert.deepEqual(sampledAt, [32150, 32217]);
 });
 
