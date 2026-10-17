@@ -279,6 +279,7 @@ export class BrowserVision {
     let foreheadCount = 0;
     let backgroundGreen = 0;
     let backgroundCount = 0;
+    const regions: { r: number; g: number; b: number }[] = [];
 
     for (let region = 0; region < this.pulseAnchors.length; region++) {
       const anchor = this.pulseAnchors[region];
@@ -289,7 +290,9 @@ export class BrowserVision {
         anchor.height
       ).data;
 
+      let regionRed = 0;
       let regionGreen = 0;
+      let regionBlue = 0;
       let regionCount = 0;
       for (let i = 0; i < pixels.length; i += 4) {
         const rr = pixels[i];
@@ -308,12 +311,21 @@ export class BrowserVision {
         b += bb;
         count++;
         regionGreen += gg;
+        regionRed += rr;
+        regionBlue += bb;
         regionCount++;
       }
 
       if (region === 0) {
         foreheadGreen = regionGreen;
         foreheadCount = regionCount;
+      }
+      if (regionCount > 0) {
+        regions.push({
+          r: regionRed / regionCount,
+          g: regionGreen / regionCount,
+          b: regionBlue / regionCount
+        });
       }
     }
 
@@ -348,6 +360,7 @@ export class BrowserVision {
         b: b / count,
         ...(foreheadCount > 0 ? { gForehead: foreheadGreen / foreheadCount } : {}),
         ...(backgroundCount > 0 ? { gBackground: backgroundGreen / backgroundCount } : {}),
+        ...(regions.length === this.pulseAnchors.length ? { regions } : {}),
         motion: this.pulseMotion
       });
     }
@@ -408,7 +421,7 @@ export class BrowserVision {
           facingMode: "user",
           width: { ideal: 640 },
           height: { ideal: 480 },
-          frameRate: { ideal: 24, max: 30 }
+          frameRate: { ideal: 30, max: 30 }
         }
       });
 
