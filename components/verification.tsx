@@ -1,6 +1,6 @@
 "use client";
 import * as React from "react";
-import { analyzePulse, previewPulse } from "../lib/rppg.ts";
+import { analyzePulse, previewPulse, type RGBSample } from "../lib/rppg.ts";
 import { BrowserVision, cameraError } from "../lib/vision.ts";
 import { createPlan, createTracker, challengeTitle, challengeHint, livenessSignal } from "../lib/challenges.ts";
 import type { ChallengeTracker, CueDisplay } from "../lib/challenges.ts";
@@ -61,6 +61,7 @@ export class Verification extends React.Component<Record<string, never>, State> 
   private lightLock: CameraLockKey[] = []; // camera auto-corrections held during the light check
   private samples: ColorSample[] = [];
   private pulseSignal: Signal = noPulse();
+  private pulseTrace: RGBSample[] = []; // retained only for an explicit debug-mode download
   private session: ServerSession | null = null; // null = local only
   private audio: AudioCapture | null = null; // microphone; open only with explicit consent
   private speech: DigitsCheck | null = null; // set only during a microphone-backed digits prompt
@@ -84,7 +85,7 @@ export class Verification extends React.Component<Record<string, never>, State> 
     this.generation++; this.clearTimer(); this.tracker = null;
     this.speech?.cancel(); this.speech = null; this.finishing = false; this.digitMetrics = null;
     this.audio?.stop(); this.audio = null; this.sync = noSync();
-    this.engine?.stop(); this.engine = null; this.samples = []; this.pulseSignal = noPulse();
+    this.engine?.stop(); this.engine = null; this.samples = []; this.pulseSignal = noPulse(); this.pulseTrace = [];
     if (this.samplesCanvas) { this.samplesCanvas.width = 0; this.samplesCanvas.height = 0; this.samplesCanvas = null; }
     if (this.overlay) this.overlay.getContext("2d")?.clearRect(0, 0, this.overlay.width, this.overlay.height);
   }
@@ -248,6 +249,7 @@ export class Verification extends React.Component<Record<string, never>, State> 
     }
     this.clearTimer();
     this.pulseSignal = noPulse();
+    this.pulseTrace = [];
     engine.startPulse();
     const started = performance.now();
     this.setState({
@@ -277,6 +279,7 @@ export class Verification extends React.Component<Record<string, never>, State> 
     if (this.state.stage !== "pulse") return;
     this.clearTimer();
     const samples = this.engine?.stopPulse() ?? [];
+    this.pulseTrace = this.debug ? samples : [];
     if (!this.mounted || this.state.stage !== "pulse") return;
 
     const result = skipped ? null : analyzePulse(samples);
@@ -297,6 +300,24 @@ export class Verification extends React.Component<Record<string, never>, State> 
       pulseWave: result?.waveform && result.waveform.length > 0 ? result.waveform : this.state.pulseWave,
     });
   }
+  private downloadPulseTrace = () => {
+    if (!this.debug || !this.pulseTrace.length) return;
+    const payload = {
+      format: "aegis-presence-pulse-trace-v1",
+      note: "Per-frame facial RGB averages and timing only; no images, video, or audio.",
+      samples: this.pulseTrace,
+      analysis: analyzePulse(this.pulseTrace),
+    };
+    const blob = new Blob([JSON.stringify(payload)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "aegis-pulse-trace.json";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
   private continueAfterPulse = () => {
     this.beginReflection();
   };
@@ -394,8 +415,10 @@ export class Verification extends React.Component<Record<string, never>, State> 
         <div className="prompt-actions">
           <button className="button button-primary" onClick={this.continueAfterPulse}>{s.lightConsent ? "Continue to light check" : "See summary result"}<Icon name="arrow" size={18} /></button>
           <button className="button button-secondary" onClick={() => this.beginPulse()}><Icon name="refresh" size={16} />Retry pulse check</button>
+          {this.debug && this.pulseTrace.length > 0 && <button className="button button-secondary" onClick={this.downloadPulseTrace}>Download pulse signal data</button>}
           <button className="button button-text" onClick={this.cancel}>Stop camera</button>
         </div>
+        {this.debug && this.pulseTrace.length > 0 && <p className="microcopy">The optional download contains numeric color averages and frame times. It stays on your device unless you choose to share it.</p>}
         <p className="microcopy">Local rPPG is an experimental heuristic. An inconclusive or skipped check contributes missing evidence toward a step-up decision.</p>
       </div>;
     }
