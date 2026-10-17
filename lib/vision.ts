@@ -103,6 +103,7 @@ export class BrowserVision {
   private pulseSamples: RGBSample[] | null = null;
   private pulseCanvas: HTMLCanvasElement | null = null;
   private pulsePoints: Point[] = [];
+  private pulseAnchors: { x: number; y: number; boxX: number; boxY: number }[] | null = null;
   private pulseFaceCount = 0;
   private pulseMotion = false;
   private previousNose: Point | null = null;
@@ -151,6 +152,7 @@ export class BrowserVision {
     this.pulseCanvas.width = 320;
     this.pulseCanvas.height = 240;
 
+    this.pulseAnchors = null;
     this.previousNose = null;
     this.pulseMotion = false;
   }
@@ -164,6 +166,7 @@ export class BrowserVision {
     this.pulseSamples = null;
     this.pulseCanvas = null;
     this.pulsePoints = [];
+    this.pulseAnchors = null;
     this.previousNose = null;
     this.pulseMotion = false;
 
@@ -176,10 +179,7 @@ export class BrowserVision {
       : [];
   }
 
-  /**
-   * Sample forehead and cheek RGB values.
-   * The canvas is temporary and never stores video.
-   */
+  /** Sample stable forehead and cheek RGB regions without storing video. */
   private samplePulse(t: number): void {
     const canvas = this.pulseCanvas;
     const video = this.video;
@@ -203,36 +203,61 @@ export class BrowserVision {
 
     ctx.drawImage(video, 0, 0, 320, 240);
 
-    const regions = [
+    const rawRegions = [
       {
         x: (points[109].x + points[338].x) / 2,
         y: (points[10].y + points[9].y) / 2
       },
-      points[50],
-      points[280]
+      {
+        x: (points[50].x + (points[101]?.x ?? points[50].x)) / 2,
+        y: (points[50].y + (points[101]?.y ?? points[50].y)) / 2
+      },
+      {
+        x: (points[280].x + (points[330]?.x ?? points[280].x)) / 2,
+        y: (points[280].y + (points[330]?.y ?? points[280].y)) / 2
+      }
     ];
+
+    const patchSize = 16;
+    const halfPatch = patchSize / 2;
+
+    if (!this.pulseAnchors || this.pulseAnchors.length !== rawRegions.length) {
+      this.pulseAnchors = rawRegions.map(point => {
+        const x = Math.max(0, Math.min(320 - patchSize, point.x * 320 - halfPatch));
+        const y = Math.max(0, Math.min(240 - patchSize, point.y * 240 - halfPatch));
+        return { x, y, boxX: Math.round(x), boxY: Math.round(y) };
+      });
+    } else {
+      for (let i = 0; i < rawRegions.length; i++) {
+        const point = rawRegions[i];
+        const targetX = Math.max(0, Math.min(320 - patchSize, point.x * 320 - halfPatch));
+        const targetY = Math.max(0, Math.min(240 - patchSize, point.y * 240 - halfPatch));
+        const anchor = this.pulseAnchors[i];
+        const distance = Math.hypot(targetX - anchor.x, targetY - anchor.y);
+        const alpha = distance < 1.5 ? 0.08 : 0.35;
+        anchor.x += (targetX - anchor.x) * alpha;
+        anchor.y += (targetY - anchor.y) * alpha;
+
+        if (Math.abs(anchor.x - anchor.boxX) > 0.85) {
+          anchor.boxX = Math.round(anchor.x);
+        }
+        if (Math.abs(anchor.y - anchor.boxY) > 0.85) {
+          anchor.boxY = Math.round(anchor.y);
+        }
+      }
+    }
 
     let r = 0;
     let g = 0;
     let b = 0;
     let count = 0;
 
-    for (const pt of regions) {
-      const x = Math.max(
-        0,
-        Math.min(306, Math.round(pt.x * 320) - 7)
-      );
-
-      const y = Math.max(
-        0,
-        Math.min(226, Math.round(pt.y * 240) - 7)
-      );
-
+    for (const anchor of this.pulseAnchors) {
       const pixels = ctx.getImageData(
-        x,
-        y,
-        14,
-        14
+        anchor.boxX,
+        anchor.boxY,
+        patchSize,
+        patchSize
       ).data;
 
       for (let i = 0; i < pixels.length; i += 4) {
@@ -241,8 +266,8 @@ export class BrowserVision {
         const bb = pixels[i + 2];
 
         if (
-          Math.min(rr, gg, bb) < 12 ||
-          Math.max(rr, gg, bb) > 245
+          Math.min(rr, gg, bb) < 5 ||
+          Math.max(rr, gg, bb) > 250
         ) {
           continue;
         }

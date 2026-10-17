@@ -1,6 +1,6 @@
 "use client";
 import * as React from "react";
-import { analyzePulse } from "../lib/rppg.ts";
+import { analyzePulse, previewPulse } from "../lib/rppg.ts";
 import { BrowserVision, cameraError } from "../lib/vision.ts";
 import { createPlan, createTracker, challengeTitle, challengeHint, livenessSignal } from "../lib/challenges.ts";
 import type { ChallengeTracker, CueDisplay } from "../lib/challenges.ts";
@@ -244,8 +244,8 @@ export class Verification extends React.Component<Record<string, never>, State> 
       const elapsed = performance.now() - started;
       const seconds = Math.max(0, Math.ceil((12000 - elapsed) / 1000));
       if (seconds !== this.state.pulseSeconds) this.setState({ pulseSeconds: seconds });
-      if (elapsed >= 8000 && Math.floor(elapsed / 1000) !== Math.floor((elapsed - 250) / 1000)) {
-        const preview = analyzePulse(this.engine?.getPulseSamples() ?? []);
+      if (elapsed >= 4000 && Math.floor(elapsed / 1000) !== Math.floor((elapsed - 250) / 1000)) {
+        const preview = previewPulse(this.engine?.getPulseSamples() ?? []);
         this.setState({ pulseBpm: preview.bpm, pulseWave: preview.waveform });
       }
       if (elapsed >= 12000) this.endPulse();
