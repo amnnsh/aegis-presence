@@ -582,6 +582,69 @@ test("matching face patches do not accept a still image under periodic lighting"
   assert.equal(result.risk, null, result.detail);
 });
 
+function noisyColorCheekFixture(kind: "face" | "lit-photo"): RGBSample[] {
+  const samples: RGBSample[] = [];
+  let seed = 472;
+  const random = () => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed / 4294967296 - 0.5;
+  };
+
+  for (let frame = 0; frame < 450; frame++) {
+    const t = frame * 1000 / 25;
+    const seconds = t / 1000;
+    const beat = Math.sin(2 * Math.PI * 1.15 * seconds) +
+      0.2 * Math.sin(4 * Math.PI * 1.15 * seconds - 0.7);
+    const lamp = 1 + 0.001 * Math.sin(2 * Math.PI * 1.7 * seconds);
+    const photo = kind === "lit-photo"
+      ? 1 + 0.007 * Math.sin(2 * Math.PI * 1.15 * seconds)
+      : 1;
+    const forehead = {
+      r: 145 * lamp * photo + random() * 7,
+      g: 118 * lamp * photo + random() * 7,
+      b: 96 * lamp * photo + random() * 7
+    };
+    const cheeks = [0, 1].map((_, index) => ({
+      // The two color channels have unrelated camera artifacts that swamp POS.
+      r: 145 * lamp * photo +
+        3 * Math.sin(2 * Math.PI * (index ? 1.9 : 2.15) * seconds) +
+        random() * 0.7,
+      g: 118 * lamp * photo + (kind === "face" ? -0.55 * beat : 0) +
+        random() * 0.25,
+      b: 96 * lamp * photo +
+        3 * Math.sin(2 * Math.PI * (index ? 2.05 : 1.85) * seconds + 0.7) +
+        random() * 0.7
+    }));
+    const regions = [forehead, ...cheeks];
+    const mix = (channel: "r" | "g" | "b") =>
+      0.8 * forehead[channel] +
+      0.1 * cheeks[0][channel] +
+      0.1 * cheeks[1][channel];
+    samples.push({
+      t,
+      r: mix("r"), g: mix("g"), b: mix("b"),
+      gForehead: forehead.g,
+      gBackground: 180 * lamp * photo + random() * 0.15,
+      regions,
+      motion: false
+    });
+  }
+  return samples;
+}
+
+test("matching green cheek rhythm survives noisy red and blue channels", () => {
+  const result = analyzePulse(noisyColorCheekFixture("face"));
+  assert.ok(result.bpm !== null && Math.abs(result.bpm - 69) < 4, result.detail);
+  assert.equal(result.risk, 45, result.detail);
+  assert.match(result.detail, /Matching green-channel rhythm in both cheeks/);
+});
+
+test("matching cheek brightness from a periodic lamp on a photo is rejected", () => {
+  const result = analyzePulse(noisyColorCheekFixture("lit-photo"));
+  assert.equal(result.risk, null, result.detail);
+  assert.equal(result.bpm, null, result.detail);
+});
+
 test("pulse capture uses the callback clock when camera mediaTime stays zero", () => {
   const sampledAt: number[] = [];
   const callbacks: ((now: number, frame: { mediaTime: number; presentedFrames: number }) => void)[] = [];
