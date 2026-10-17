@@ -24,6 +24,18 @@ export function resampleTo(input: Float32Array, fromRate: number, toRate = ASR_S
   return out;
 }
 
+/** Apply one bounded gain to the transcription copy only; preserve the raw lip-sync envelope.
+ * Never amplify digital silence, never attenuate normal speech, and leave peak headroom.
+ */
+export function normalizeSpeech(pcm: Float32Array): Float32Array {
+  let peak = 0;
+  for (const sample of pcm) peak = Math.max(peak, Math.abs(sample));
+  if (!Number.isFinite(peak) || peak < 0.001) return pcm;
+  const gain = Math.min(20, 0.8 / peak);
+  if (gain <= 1) return pcm;
+  return pcm.map(sample => sample * gain);
+}
+
 export function microphoneError(error: unknown): string {
   const name = error instanceof DOMException ? error.name : "";
   if (name === "NotAllowedError" || name === "SecurityError") return "Microphone permission was not granted. The spoken-digit and lip-sync checks stay unavailable; nothing is simulated in their place.";
@@ -62,10 +74,11 @@ export class AudioCapture {
     if (this.stopped) { stream.getTracks().forEach(t => t.stop()); return; }
     this.stream = stream;
     stream.getAudioTracks()[0]?.addEventListener("ended", this.onEnded);
-    let context: AudioContext;
-    try { context = new AudioContext({ sampleRate: ASR_SAMPLE_RATE, latencyHint: "interactive" }); } catch { context = new AudioContext(); }
-    this.context = context;
     try {
+      // Capture at the browser's device rate. Forcing 16 kHz here can prevent
+      // Firefox versions from connecting the microphone; end() resamples for ASR.
+      const context = new AudioContext({ latencyHint: "interactive" });
+      this.context = context;
       await context.audioWorklet.addModule(WORKLET_URL);
       if (this.stopped) return;
       const node = new AudioWorkletNode(context, "aegis-capture", { numberOfInputs: 1, numberOfOutputs: 1 });
@@ -117,3 +130,4 @@ export class AudioCapture {
     if (context && context.state !== "closed") context.close().catch(() => undefined);
   }
 }
+

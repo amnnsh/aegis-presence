@@ -13,7 +13,7 @@
     "build": "npm run assets && node scripts/next.mjs build",
     "start": "node scripts/serve.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types --test tests/risk.test.ts tests/challenges.test.ts tests/injection.test.ts tests/reflection.test.ts tests/api.test.ts tests/sync.test.ts tests/digits.test.ts tests/rppg.test.ts",
+    "test": "node --experimental-strip-types --test tests/risk.test.ts tests/challenges.test.ts tests/injection.test.ts tests/reflection.test.ts tests/api.test.ts tests/sync.test.ts tests/digits.test.ts tests/rppg.test.ts tests/speech.test.ts",
     "check": "npm run typecheck && npm test && npm run build",
     "test:browser": "playwright test"
   },
@@ -34,3 +34,4 @@
     "typescript": "~5.9.3"
   }
 }
+

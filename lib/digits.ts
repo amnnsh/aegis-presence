@@ -30,9 +30,10 @@ export function matchedDigits(expected: string, heard: string): number {
 /** 4/4 -> risk 10, 3/4 -> 40, fewer -> 75, nothing heard -> unavailable. Speech content only: it says nothing about WHO spoke. */
 export function scoreDigits(expected: string, transcript: string): ChallengeResult {
   const heard = normalizeDigits(transcript);
-  if (!heard) return { kind: "digits", status: "unavailable", risk: null, heard: "", matched: 0, detail: "No digits were recognized in the audio. Missing evidence is not a pass." };
+  if (!heard) return { kind: "digits", status: "unavailable", risk: null, heard: "", matched: 0, detail: "Audio was received, but no digits were recognized. Try reading each digit separately at your normal volume, then pause. Missing evidence is not a pass." };
   const matched = matchedDigits(expected, heard);
   const risk = matched >= expected.length ? 10 : matched === expected.length - 1 ? 40 : 75;
   return { kind: "digits", status: "observed", risk, heard, matched,
     detail: `${matched}/${expected.length} prompted digits recognized by an on-device speech model. This checks the words, not the speaker's identity.` };
 }
+

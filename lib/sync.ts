@@ -8,7 +8,7 @@ import type { Signal } from "./types.ts";
 export interface Sample { t: number; v: number } // t in milliseconds on a shared clock
 export interface SyncResult { peakCorr: number; lagMs: number; voicedFraction: number }
 
-export const SYNC = { hz: 50, maxLagMs: 300, minOverlapMs: 1000, minVoiced: 0.1, strongCorr: 0.5, weakCorr: 0.3, maxAbsLagMs: 200, voiceFloor: 0.01, voiceRatio: 3 } as const;
+export const SYNC = { hz: 50, maxLagMs: 300, minOverlapMs: 1000, minVoiced: 0.1, strongCorr: 0.5, weakCorr: 0.3, maxAbsLagMs: 200, voiceFloor: 0.001, voiceRatio: 3 } as const;
 
 /** Loudness above this is treated as voice: three times the quiet floor (10th percentile), never below a fixed minimum.
  * A steady loud room therefore reads as "no voice" instead of as speech.
@@ -91,3 +91,4 @@ export function syncSignal(result: SyncResult | null, reason = "Not enough overl
   return { id: "sync", risk, provenance: "heuristic",
     detail: `Mouth opening and loudness: peak correlation ${round2(result.peakCorr)} at ${result.lagMs} ms lag, voice in ${Math.round(result.voicedFraction * 100)}% of the window. On-device correlation heuristic with untuned thresholds; not a lip-sync model and not proof of a live speaker.` };
 }
+
