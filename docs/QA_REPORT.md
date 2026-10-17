@@ -161,6 +161,25 @@ Browser and version: ____  Date: ____
 
 **Acceptance:** every built-in camera stays low (8 to 18), and OBS playing a video scores clearly higher even with its label hidden. If OBS with a hidden label only reaches 8, record which values matched a real camera. Likely culprits are the jitter and the repeated-frame ratio. Then adjust `CAMERA_FLAGS` in `lib/injection.ts` and its tests.
 
+### Virtual camera detection — hardware calibration required before demo
+
+The new native-mode and sensor-response probes run only when supported and restore camera settings afterward. Whole-session frame hashes and a 32×32 corner patch supply loop and frozen-background evidence. These are browser heuristics, not hardware attestation. A synthetic Chromium loop is a software fixture; it cannot establish real-camera false-positive rates.
+
+Record browser/version, OS, camera model, and build commit for every run. Enter `N/A` when a control is unavailable, not zero. Repeat each physical run at least twice in ordinary and low light. The table remains **pending** because this environment has no webcam, OBS installation, or access to the team's laptops.
+
+| Laptop / OS and device | Native modes | Probe control + luma delta | Loop | Frozen share | Flags | Risk | Virtual-camera verdict |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Team laptop 1 built-in camera | Pending | Pending | Pending | Pending | Pending | Pending | Pending |
+| Team laptop 2 built-in camera | Pending | Pending | Pending | Pending | Pending | Pending | Pending |
+| Every other team laptop built-in camera, including MacBook | Pending | Pending | Pending | Pending | Pending | Pending | Pending |
+| USB webcam | Pending | Pending | Pending | Pending | Pending | Pending | Pending |
+| OBS Virtual Camera, looping clip | Pending | Pending | Pending | Pending | Pending | Pending | Pending |
+| OBS looping clip, label renamed | Pending | Pending | Pending | Pending | Pending | Pending | Pending |
+| OBS Virtual Camera, still image | Pending | Pending | Pending | Pending | Pending | Pending | Pending |
+| NVIDIA Broadcast / Windows Studio Effects, if available | Pending | Pending | Pending | Pending | Pending | Pending | Pending |
+
+**Acceptance before demo:** no physical camera reaches `likely`; renamed OBS reaches at least `suspected`; a looped clip reaches `likely`. If any genuine camera has a frozen share at or above 0.90, raise `FROZEN.identicalShare` or demote `frozen_background` to supporting, then record the measured values and rationale here. Do not claim detection rates from this table.
+
 ## Live dashboard and presenter labels (added October 17, 2026)
 
 `/admin/` now reads the verification server when `NEXT_PUBLIC_API_URL` is set. The operator types the admin token, which is kept in that tab's `sessionStorage` and never bundled. The page loads recent sessions, streams new and changed ones over Server-Sent Events, and builds the KPI cards and a "Team test sessions" table from `GET /api/admin/summary`. That table counts only sessions with a presenter label and a decision, so each row adds up. Unlabeled visitor sessions and undecided sessions are listed in a footnote, not counted. Labels are chosen on `/verify/?demo=1` and never used for scoring. With no server configured, or the server unreachable, the page falls back to the labeled mock fixtures.

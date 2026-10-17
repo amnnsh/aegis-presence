@@ -1,4 +1,5 @@
-import type { Decision, DecisionResult, Signal, SignalId } from "./types.ts";
+import type { AttackCheck, Decision, DecisionResult, Signal, SignalId } from "./types.ts";
+import { applyAttackPolicy } from "./attacks.ts";
 
 export const SIGNALS: { id: SignalId; title: string; weight: number; short: string }[] = [
   { id: "injection", title: "Camera integrity", weight: 20, short: "Device metadata" },
@@ -17,7 +18,7 @@ export function finiteRisk(value: number | null | undefined): value is number {
  * Live mode excludes ALL simulated scores. Missing/invalid evidence costs a fixed 60.
  * Never renormalize away a missing weight. Never trust client-side decisions in production.
  */
-export function evaluateRisk(input: Signal[], mode: "live" | "simulation"): DecisionResult {
+export function evaluateRisk(input: Signal[], mode: "live" | "simulation", attackChecks: AttackCheck[] = []): DecisionResult {
   const signals = SIGNALS.map(({ id }) => {
     const matches = input.filter(s => s.id === id);
     const s = matches.length === 1 ? matches[0] : undefined;
@@ -65,5 +66,5 @@ export function evaluateRisk(input: Signal[], mode: "live" | "simulation"): Deci
     : decision === "reject"
       ? (mode === "simulation" ? "Several fixture signals exceed the demo risk threshold; the illustrative policy rejects this scenario." : "Multiple local heuristics raised risk. Stop this attempt and use a trusted alternative; this is not proof of fraud.")
       : (mode === "live" ? "Some evidence is missing or unverified. Use a trusted second factor or a human-assisted check; this prototype performs neither." : "The fixture has ambiguous evidence. The illustrative policy requests an additional verification method.");
-  return { decision, risk, mode, coverage, explanation, reasons, signals, contributions };
+  return applyAttackPolicy({ decision, risk, mode, coverage, explanation, reasons, signals, contributions }, attackChecks, mode);
 }

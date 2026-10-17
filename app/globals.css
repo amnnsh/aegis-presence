@@ -97,3 +97,13 @@
 .presenter-select small{font-size:10px;color:#8e7851}
 @media (prefers-reduced-motion:reduce){.row-flash{animation:none;background:#fbf3d4}}
 .results-table thead th{white-space:nowrap}
+.attack-checks{padding:24px;border-top:1px solid var(--line)}
+.attack-checks h3{font-size:16px;margin:0 0 14px}
+.attack-check-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px}
+.attack-check-card{border:1px solid var(--line);border-radius:9px;padding:16px;background:#f9fbf8}
+.attack-check-heading{display:flex;justify-content:space-between;align-items:baseline;gap:12px}
+.attack-check-heading h4{font-size:13px;margin:0}
+.attack-check-heading strong{font-size:11px;color:#8a6232}
+.attack-check-card ul{margin:12px 0 0;padding-left:18px}
+.attack-check-card li,.attack-check-card p{font-size:11px;line-height:1.55}
+.attack-check-card code{font-family:var(--mono);font-size:10px}

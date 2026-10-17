@@ -42,9 +42,24 @@ export interface DecisionResult {
     usedRisk: number;
     substituted: boolean;
   }[];
+  attackChecks?: AttackCheck[];
 
   /** Present only when the backend recomputed and signed this result. */
   server?: ServerCheck;
+}
+
+export type AttackCheckId = "screen_replay" | "virtual_camera";
+export interface AttackIndicator {
+  id: string;
+  kind: "strong" | "supporting";
+  ran: boolean;
+  fired: boolean;
+  detail: string;
+}
+export interface AttackCheck {
+  id: AttackCheckId;
+  verdict: "likely" | "suspected" | "not_enough_evidence";
+  indicators: AttackIndicator[];
 }
 
 export interface ServerCheck {
@@ -70,6 +85,24 @@ export interface DeviceEvidence {
   videoInputCount?: number | null;
   /** First ~3 s of requestVideoFrameCallback metadata; null until measured or when unsupported. */
   frameTiming?: FrameTiming | null;
+  /** Active camera-control probes; unavailable probes contribute no risk. */
+  probes?: CameraProbes | null;
+  /** Compact, on-device frame-hash and background-noise summary. */
+  feed?: FeedStats | null;
+}
+
+export interface CameraProbes {
+  nativeModes: { ran: boolean; modes: number | null; fired: boolean };
+  sensorResponse: { ran: boolean; control: string | null; deltaLevels: number | null; fired: boolean };
+}
+
+export interface FeedStats {
+  frames: number;
+  loopFound: boolean;
+  loopPeriodMs: number | null;
+  loopRunFrames: number;
+  frozenIdenticalShare: number | null;
+  frozenPairs: number;
 }
 
 export interface NumberRange {
