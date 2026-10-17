@@ -5,7 +5,7 @@ import { BrowserVision, cameraError } from "../lib/vision.ts";
 import { createPlan, createTracker, challengeTitle, challengeHint, livenessSignal } from "../lib/challenges.ts";
 import type { ChallengeTracker, CueDisplay } from "../lib/challenges.ts";
 import { describePose } from "../lib/head-pose.ts";
-import { inspectCamera } from "../lib/injection.ts";
+import { describeControls, describeFrameTiming, inspectCamera } from "../lib/injection.ts";
 import { evaluateRisk, SIGNALS } from "../lib/risk.ts";
 import { SCENARIOS, scenarioResult } from "../lib/scenarios.ts";
 import { COLOR_HOLD_MS, COLOR_SETTLE_MS, lightSequence, readCheekColor, reflectionSignal } from "../lib/reflection.ts";
@@ -15,6 +15,7 @@ import { AudioCapture, MAX_RECORD_MS, microphoneError } from "../lib/audio.ts";
 import { DigitsCheck } from "../lib/speech.ts";
 import type { DigitsOutcome } from "../lib/speech.ts";
 import { apiConfigured, openSession } from "../lib/api.ts";
+import { PRESENTER_LABELS, presenterLabel } from "../lib/dashboard.ts";
 import type { ServerSession } from "../lib/api.ts";
 import { Header, Footer, Icon, SourceBadge, PrivacyNote, PrototypeNotice, ResultView, signalIcons } from "./ui.tsx";
 
@@ -24,12 +25,12 @@ interface State {
   scenario: ScenarioId; sessionId: string; challenges: Challenge[]; challengeIndex: number;
   results: ChallengeResult[]; secondsLeft: number; hint: string; faceCount: number | null;
   device: DeviceEvidence | null; model: "idle" | "loading" | "ready" | "unavailable";
-  modelError: string; error: string; result: DecisionResult | null; cue: CueDisplay; lightStep: number; colors: Stimulus[]; pulseSeconds: number; pulseBpm: number | null; pulseWave: number[];
+  modelError: string; error: string; result: DecisionResult | null; cue: CueDisplay; presenter: string; lightStep: number; colors: Stimulus[]; pulseSeconds: number; pulseBpm: number | null; pulseWave: number[];
 }
 function initialState(): State {
   return { stage: "setup", tab: "live", consent: false, lightConsent: false, micConsent: false, mic: "off", scenario: "normal", sessionId: "",
     challenges: [], challengeIndex: 0, results: [], secondsLeft: 25, hint: "", faceCount: null,
-    device: null, model: "idle", modelError: "", error: "", result: null, cue: null, lightStep: 0, colors: [], pulseSeconds: 12, pulseBpm: null, pulseWave: [] };
+    device: null, model: "idle", modelError: "", error: "", result: null, cue: null, presenter: "", lightStep: 0, colors: [], pulseSeconds: 12, pulseBpm: null, pulseWave: [] };
 }
 const noReflection = (detail = "Screen-color check was not performed. Skipping is supported and never counts as a pass."): Signal => ({ id: "reflection", risk: null, provenance: "unavailable", detail });
 
@@ -48,6 +49,7 @@ export class Verification extends React.Component<Record<string, never>, State> 
   private advance: ReturnType<typeof setTimeout> | null = null; // auto-advance after the 1.2 s result message
   private debugEl: HTMLDivElement | null = null; // ?debug=1 head-pose readout
   private debug = false;
+  private demo = false; // ?demo=1: the team labels its own test sessions
   private generation = 0;
   private mounted = false;
   private deadline = 0;
@@ -67,6 +69,8 @@ export class Verification extends React.Component<Record<string, never>, State> 
     const params = new URLSearchParams(window.location.search);
     if (params.get("mode") === "lab") this.setState({ tab: "lab" });
     this.debug = params.get("debug") === "1";
+    this.demo = params.get("demo") === "1";
+    if (this.demo) this.setState({ presenter: presenterLabel(params.get("presenter")) });
   }
   componentWillUnmount() { this.mounted = false; this.session?.cancel(); this.release(); }
   private clearTimer() {
@@ -81,11 +85,11 @@ export class Verification extends React.Component<Record<string, never>, State> 
     if (this.samplesCanvas) { this.samplesCanvas.width = 0; this.samplesCanvas.height = 0; this.samplesCanvas = null; }
     if (this.overlay) this.overlay.getContext("2d")?.clearRect(0, 0, this.overlay.width, this.overlay.height);
   }
-  private reset = () => { this.session = null; this.release(); this.setState(initialState()); };
+  private reset = () => { this.session = null; this.release(); this.setState({ ...initialState(), presenter: this.state.presenter }); };
   private cancel = () => {
     this.session?.cancel(); this.session = null;
     this.release();
-    this.setState({ ...initialState(), consent: this.state.consent, error: "Session cancelled. Camera stopped and evidence discarded." });
+    this.setState({ ...initialState(), consent: this.state.consent, presenter: this.state.presenter, error: "Session cancelled. Camera stopped and evidence discarded." });
   };
   private startCamera = () => {
     if (!this.state.consent || this.state.stage !== "setup") return;
@@ -98,7 +102,8 @@ export class Verification extends React.Component<Record<string, never>, State> 
     const current = () => this.mounted && generation === this.generation;
     const challenges = createPlan().challenges; // local fallback; replaced by the server plan when one arrives
     const params = new URLSearchParams(window.location.search);
-    const opening = openSession({ linkId: params.get("s"), presenterLabel: params.get("presenter") });
+    // Presenter labels exist only for the team's own demo sessions; they are never used for scoring.
+    const opening = openSession({ linkId: params.get("s"), presenterLabel: this.demo ? this.state.presenter || null : null });
     this.setState({ stage: "preparing", challenges, challengeIndex: 0, results: [], error: "", modelError: "", model: "idle", mic: "off", faceCount: null, device: null, sessionId: `LIVE-${crypto.randomUUID().slice(0, 8).toUpperCase()}` }, () => {
       if (!this.video || !current()) return;
       document.querySelector(".verification-main")?.scrollIntoView({ block: "start", behavior: "instant" });
@@ -324,7 +329,7 @@ export class Verification extends React.Component<Record<string, never>, State> 
   };
   private renderPrompt() {
     const s = this.state;
-    if (s.stage === "setup") return <div className="prompt-card"><span className="eyebrow">BEFORE YOU BEGIN</span><h2>Your camera. Your control.</h2><p>Use a well-lit space and keep your face visible. The camera starts only after your permission. You can stop or skip a challenge at any time.</p><label className="consent"><input type="checkbox" checked={s.consent} onChange={e => this.setState({ consent: e.target.checked })} /><span>{apiConfigured() ? "I agree to temporary, on-device webcam processing for this demo. No image, video, or audio is recorded or uploaded; event timing and risk scores are sent to the verification server." : "I agree to temporary, on-device webcam processing for this demo. Nothing is recorded or uploaded."}</span></label><label className="consent light-consent"><input type="checkbox" checked={s.lightConsent} onChange={e => this.setState({ lightConsent: e.target.checked })} /><span>Also enable the optional slow screen-color check (the whole screen changes color six times).<small>Changing colors may cause discomfort. Leave this off for photosensitivity; skipping routes to step-up.</small></span></label><label className="consent light-consent"><input type="checkbox" checked={s.micConsent} onChange={e => this.setState({ micConsent: e.target.checked })} /><span>Use my microphone for the spoken-digit check (processed on this device, never uploaded).<small>Optional. Without it the digits prompt checks mouth motion only and lip / voice timing stays unavailable.</small></span></label><div className="prompt-actions"><button className="button button-primary" disabled={!s.consent} onClick={this.startCamera}><Icon name="camera" size={18} />Enable webcam</button><button className="button button-text" onClick={() => this.finishLive()}>Continue without camera</button></div></div>;
+    if (s.stage === "setup") return <div className="prompt-card"><span className="eyebrow">BEFORE YOU BEGIN</span><h2>Your camera. Your control.</h2><p>Use a well-lit space and keep your face visible. The camera starts only after your permission. You can stop or skip a challenge at any time.</p><label className="consent"><input type="checkbox" checked={s.consent} onChange={e => this.setState({ consent: e.target.checked })} /><span>{apiConfigured() ? "I agree to temporary, on-device webcam processing for this demo. No image, video, or audio is recorded or uploaded; event timing and risk scores are sent to the verification server." : "I agree to temporary, on-device webcam processing for this demo. Nothing is recorded or uploaded."}</span></label><label className="consent light-consent"><input type="checkbox" checked={s.lightConsent} onChange={e => this.setState({ lightConsent: e.target.checked })} /><span>Also enable the optional slow screen-color check (the whole screen changes color six times).<small>Changing colors may cause discomfort. Leave this off for photosensitivity; skipping routes to step-up.</small></span></label><label className="consent light-consent"><input type="checkbox" checked={s.micConsent} onChange={e => this.setState({ micConsent: e.target.checked })} /><span>Use my microphone for the spoken-digit check (processed on this device, never uploaded).<small>Optional. Without it the digits prompt checks mouth motion only and lip / voice timing stays unavailable.</small></span></label>{this.demo && <label className="presenter-select"><span>Presenter label (demo only, not used for scoring)</span><select value={s.presenter} onChange={e => this.setState({ presenter: e.target.value })}><option value="">Not labeled</option>{PRESENTER_LABELS.map(label => <option key={label} value={label}>{label}</option>)}</select>{!apiConfigured() && <small>No verification server is configured, so the label is not sent anywhere.</small>}</label>}<div className="prompt-actions"><button className="button button-primary" disabled={!s.consent} onClick={this.startCamera}><Icon name="camera" size={18} />Enable webcam</button><button className="button button-text" onClick={() => this.finishLive()}>Continue without camera</button></div></div>;
     if (s.stage === "preparing") return <div className="prompt-card"><span className="eyebrow">STARTING LOCALLY</span><h2>{s.device ? "Loading face landmarks" : "Waiting for camera permission"}</h2><p>{s.device ? "The model and WASM load from this site's own origin. No frames leave your browser." : "Choose Allow in your browser's camera prompt. A denied or unanswered request never becomes a pass."}</p><button className="button button-secondary" onClick={this.cancel}>Cancel and stop camera</button></div>;
     if (s.stage === "ready") return <div className="prompt-card"><span className="eyebrow">{s.model === "ready" ? "CAMERA READY" : "LIMITED EVIDENCE"}</span><h2>{s.model === "ready" ? "A new challenge, every session." : "Landmarks are unavailable."}</h2><p>{s.model === "ready" ? "Follow three randomly ordered prompts. Head motion and blinks are local heuristics; " + (s.mic === "ready" ? "the spoken digits are transcribed and compared with your lip movement on this device." : "without the microphone, reading digits is only a mouth-motion demonstration.") + (s.lightConsent ? " For the light check, turn your screen brightness up now." : "") : "You can see a conservative result with the missing checks marked unavailable. Nothing is silently simulated."}</p><div className="prompt-actions"><button className="button button-primary" onClick={s.model === "ready" ? () => this.startChallenge() : () => this.finishLive()}>{s.model === "ready" ? "Begin live challenges" : "Get step-up result"}<Icon name="arrow" size={18} /></button><button className="button button-text" onClick={this.cancel}>Stop camera</button></div></div>;
     if (s.stage === "challenge") { const c = s.challenges[s.challengeIndex]; return <div className="prompt-card active-prompt"><div className="prompt-heading"><span className="eyebrow">CHALLENGE {s.challengeIndex + 1} OF 3</span><span className="countdown mono">{this.finishing ? "Checking audio" : `${s.secondsLeft}s remaining`}</span></div><h2>{challengeTitle(c)}</h2><p>{challengeHint(c, s.mic === "ready")}</p><div className="challenge-feedback" role="status"><span className={`dot ${s.faceCount === 1 ? "" : "dot-amber"}`} />{s.hint}</div><div className="prompt-actions"><button className="button button-secondary" onClick={this.skipChallenge}>Skip this challenge</button><button className="button button-text" onClick={this.cancel}>Cancel session</button></div><p className="microcopy">A skip or timeout means missing evidence, not fraud and not a pass.</p></div>; }
@@ -366,7 +371,7 @@ export class Verification extends React.Component<Record<string, never>, State> 
       </section>
       <aside className="verification-sidebar"><section className="panel attack-panel"><div className="panel-heading"><span className="icon-box"><Icon name="code" size={18} /></span><div><h2>Attack simulation</h2><span className="microcopy">Predictable, fictional outcomes</span></div></div><fieldset disabled={active}><legend className="sr-only">Choose a simulated scenario</legend>{SCENARIOS.map(item => <label key={item.id} className={`scenario-option ${s.scenario === item.id && s.tab === "lab" ? "scenario-selected" : ""}`}><input type="radio" name="scenario" value={item.id} checked={s.scenario === item.id} onChange={() => this.setState({ scenario: item.id, tab: "lab" })} /><span><strong>{item.title}</strong><small>{item.description}</small></span></label>)}<button className="button button-secondary full-width" onClick={() => this.runSimulation()}><Icon name="play" size={15} />Run simulation</button></fieldset><p className="panel-footnote">{active ? "Stop the live session before switching scenarios." : "All five scores are simulated in this mode."}</p></section>
       <section className="panel signals-panel"><div className="section-heading"><h2>Signal stack</h2><span className="mono microcopy">5 LAYERS</span></div>{SIGNALS.map((signal, i) => <div className="readiness-row" key={signal.id}><Icon name={signalIcons[i]} size={17} /><div><strong>{signal.title}</strong><span>{i === 3 ? "Experimental / on-device" : i === 4 ? s.mic === "ready" ? "Microphone on / on-device" : s.mic === "blocked" ? "Microphone unavailable" : s.micConsent ? "Optional / enabled" : "Optional / microphone off" : i === 0 ? s.device ? "Metadata received" : "Waiting for camera" : i === 1 ? s.model === "ready" ? "Landmark engine ready" : "Waiting for landmarks" : s.lightConsent ? "Optional / enabled" : "Optional / off"}</span></div><span className={`readiness-dot ${i === 3 && s.model === "ready" ? "readiness-ready" : i === 0 && s.device || i === 1 && s.model === "ready" || i === 4 && s.mic === "ready" ? "readiness-ready" : ""}`} title="Local heuristic" /></div>)}<div className="signal-legend"><span><i className="readiness-dot readiness-ready" />Local heuristic</span><span><i className="readiness-dot readiness-mock" />Simulated</span></div></section>
-      {s.device && <section className="panel device-panel"><span className="eyebrow">OBSERVED CAMERA METADATA</span><dl><div><dt>Device label</dt><dd>{s.device.label || "Unavailable"}</dd></div><div><dt>Resolution</dt><dd>{s.device.width ?? "?"} &times; {s.device.height ?? "?"}</dd></div><div><dt>Reported cadence</dt><dd>{s.device.declaredFps?.toFixed(1) ?? "N/A"} fps</dd></div><div><dt>Observed cadence</dt><dd>{s.device.observedFps ?? "Sampling / unavailable"}{s.device.observedFps !== null ? " fps" : ""}</dd></div></dl><p className="microcopy">Labels and settings are spoofable. Frame cadence can vary with device load; no device ID is collected.</p></section>}
+      {s.device && <section className="panel device-panel"><span className="eyebrow">OBSERVED CAMERA METADATA</span><dl><div><dt>Device label</dt><dd>{s.device.label || "Unavailable"}</dd></div><div><dt>Resolution</dt><dd>{s.device.width ?? "?"} &times; {s.device.height ?? "?"}</dd></div><div><dt>Reported cadence</dt><dd>{s.device.declaredFps?.toFixed(1) ?? "N/A"} fps</dd></div><div><dt>Observed cadence</dt><dd>{s.device.observedFps ?? "Sampling / unavailable"}{s.device.observedFps !== null ? " fps" : ""}</dd></div><div><dt>Camera controls</dt><dd>{describeControls(s.device)}</dd></div><div><dt>Frame timing</dt><dd>{describeFrameTiming(s.device.frameTiming)}</dd></div></dl><p className="microcopy">Labels, settings, and frame timing are spoofable. Cadence can vary with device load; only a count of cameras is read, and no device ID is collected.</p></section>}
       <PrivacyNote /></aside></div><PrototypeNotice /></>}
     </main><Footer />{s.stage === "reflection" && this.renderLightOverlay()}</>;
   }

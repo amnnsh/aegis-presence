@@ -26,6 +26,8 @@ export interface AdminSession {
   link_label: string | null; ua_family: string | null;
 }
 export interface AdminSessionDetail extends AdminSession {
+  plan?: Plan;
+  clock_offset_ms?: number | null;
   events: (ClientEvent & { id: number; server_ts_ms: number })[];
   result: Omit<CompleteResponse, "session_id" | "policy_version" | "token"> | null;
 }
@@ -170,6 +172,8 @@ export async function openSession(options: { linkId?: string | null; presenterLa
 export const adminSessions = (token: string, limit = 100) => request<{ sessions: AdminSession[] }>(`/api/admin/sessions?limit=${limit}`, { token });
 export const adminSession = (token: string, id: string) => request<AdminSessionDetail>(`/api/admin/sessions/${encodeURIComponent(id)}`, { token });
 export const adminSummary = (token: string) => request<AdminSummary>("/api/admin/summary", { token });
+/** Reachability only; no token. Rejects when the server is down or not configured. */
+export const apiHealth = () => request<{ status: string; policy_version: string }>("/api/health");
 export const createLink = (token: string, label: string) => request<HelpDeskLink>("/api/links", { method: "POST", token, body: { label } });
 /** EventSource cannot send headers, so the stream is the one endpoint that takes the token as a query parameter. */
 export const adminStreamUrl = (token: string) => `${API_URL}/api/admin/stream?token=${encodeURIComponent(token)}`;

@@ -64,6 +64,37 @@ export interface DeviceEvidence {
   height: number | null;
   declaredFps: number | null;
   observedFps: number | null;
+  /** From track.getCapabilities(); null when the browser exposes none. */
+  capabilities?: CameraCapabilities | null;
+  /** Number of video inputs from enumerateDevices(). A count only: no deviceId or label is kept. */
+  videoInputCount?: number | null;
+  /** First ~3 s of requestVideoFrameCallback metadata; null until measured or when unsupported. */
+  frameTiming?: FrameTiming | null;
+}
+
+export interface NumberRange {
+  min: number;
+  max: number;
+}
+
+export interface CameraCapabilities {
+  hasExposureControl: boolean;
+  hasFocusControl: boolean;
+  hasWhiteBalanceControl: boolean;
+  width: NumberRange | null;
+  height: NumberRange | null;
+  frameRate: NumberRange | null;
+}
+
+export interface FrameTiming {
+  /** Frames sampled. Intervals = frames - 1. */
+  frames: number;
+  /** Consecutive mediaTime deltas, ms. */
+  meanIntervalMs: number;
+  stdIntervalMs: number;
+  maxGapMs: number;
+  /** Share of consecutive frames whose 16x12 grayscale thumbnails hash identically. */
+  duplicateFrameRatio: number;
 }
 
 export interface Point {

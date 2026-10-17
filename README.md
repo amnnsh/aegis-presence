@@ -25,7 +25,7 @@ A convincing face on a screen is not proof that a real person is present. Replay
 
 | Layer | Demo capability | Reality check |
 | --- | --- | --- |
-| 📷 Camera integrity | Reads browser-exposed camera metadata and frame cadence | Spoofable signals; not hardware attestation |
+| 📷 Camera integrity | Reads the camera label, exposed controls and resolution range, and the first ~3 s of frame timing (cadence jitter, gaps, repeated identical frames) | Spoofable signals; not hardware attestation. A renamed virtual camera can still pass |
 | 👁️ Active liveness | A random three-move head sequence (left / right / up / down, one arrow at a time), blinks that must answer randomly timed ring cues within 150-1500 ms, and a four-digit prompt. Prompts advance automatically, and cue / response timings are logged for the server. With the optional microphone, an on-device speech model (Whisper tiny) checks the spoken digits | Checks the words, not the speaker. Without the microphone it is mouth motion only. Does not certify liveness |
 | 🌈 Screen-light response | Optional six-step color stimulus and cheek-color sampling | Experimental; affected by lighting, exposure, and movement |
 | 💓 Pulse signal (rPPG) | Experimental on-device skin-color pulse estimate | Unvalidated; not proof of liveness or medical heart rate |
@@ -166,7 +166,7 @@ app/                    Next.js routes and styles
 components/             Verification UI, results, dashboard
 lib/vision.ts           Local camera/model lifecycle
 lib/challenges.ts       Random prompts and gesture logic
-lib/injection.ts        Camera metadata heuristics
+lib/injection.ts        Camera metadata and frame-timing heuristics
 lib/reflection.ts       Optional color-response experiment
 lib/risk.ts             Weighted policy and missing evidence
 lib/scenarios.ts        Simulated attack fixtures

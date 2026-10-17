@@ -117,6 +117,73 @@ Device: ____  Browser and version: ____  Camera: ____  Screen brightness: ____  
 
 Known limits: a replay screen can also pick up some of the laptop's colored light, so this separates poorly lit replays, not careful ones. The camera is restored to automatic when the session ends, but a tab killed mid-check cannot run that restore.
 
+## Camera integrity beyond the device label (added October 17, 2026)
+
+`inspectCamera` used to score mostly a regex on the camera label, so a renamed virtual camera passed clean. It now also uses the controls the camera exposes, its resolution range, the number of video inputs (a count only), and the first ~3 s of frame timing. Frame timing means the spread of frame intervals, the largest gap, and how often consecutive 16x12 grayscale thumbnails are identical. The label flag dropped from +62 to +35. All of it stays "heuristic": a determined attacker can fake every one of these values.
+
+| Flag | Added risk | Fires when |
+| --- | --- | --- |
+| Virtual-camera-like label | +35 | Label matches obs, virtual, manycam, xsplit, snap camera, droidcam, or ndi |
+| No controls and one fixed resolution | +25 | No exposure, focus, or white-balance control, and width and height ranges with min = max |
+| Machine-perfect cadence | +20 | Frame interval spread under 0.2 ms over at least 60 frames |
+| Repeated frames | +25 | More than 20% of consecutive frames identical, over at least 20 frames |
+| Frame gap | +10 | Any gap over 500 ms |
+
+### Executed
+
+- `npm run check` passed. `tests/injection.test.ts` covers each flag at its boundary, the lower label weight, the 95 cap, a clean laptop camera that stays at 8, and a renamed virtual camera that reaches 78 with no label flag. It also covers the capability summary (device and group IDs are never copied), the thumbnail hash, and the frame statistics.
+- `tests/camera.browser.spec.ts` drove the built export in headless Chromium with a generated video file as the camera. In the file, the picture changes every second frame. The browser measured the repeats and the result showed the repeated-frames flag.
+- Chromium's own synthetic devices, measured in the same headless setup on Linux:
+
+| Device | Label | Controls / resolution | Frame timing | Flags | Risk |
+| --- | --- | --- | --- | --- | --- |
+| Chromium synthetic camera | fake_device_0 | Exposure, focus; up to 3840x2160 | 6.5 ms jitter, 0% repeated, 100 ms max gap | none | 8 |
+| Chromium file feed, each frame shown twice | (file path) | None exposed; up to 320x240 | 14.7 ms jitter, 38% repeated, 67 ms max gap | repeated frames | 33 |
+
+### Known gap: the fixed-resolution flag rarely fires in Chrome
+
+Chrome can rescale camera frames, so it reports every camera's width and height minimum as 1 (`resizeMode: crop-and-scale`). That hides whether the device has one fixed mode. Both synthetic devices above reported min 1. So **"no controls and one fixed resolution" will almost never fire in Chrome**, including for OBS. It can fire in browsers that report real ranges. Do not remove the AND condition without data: some built-in cameras, especially on macOS, may expose no controls at all. If the table below shows that built-in cameras always expose controls and OBS never does, scoring "no controls" alone becomes reasonable.
+
+### NOT executed: the acceptance runs
+
+No real webcam or virtual camera was available here. Fill this in on the team laptops. The values appear in the "Observed camera metadata" panel and in the Camera integrity row of the result. For OBS, play a recorded face through OBS Virtual Camera, then repeat with the label hidden. On Linux, use v4l2loopback with `card_label="Integrated Webcam"`; on Windows, rename the device if possible.
+
+Browser and version: ____  Date: ____
+
+| Laptop / OS | Device | Label shown | Controls / resolution | Frame timing | Flags | Risk |
+| --- | --- | --- | --- | --- | --- | --- |
+| | Built-in camera | | | | | |
+| | Built-in camera | | | | | |
+| | Built-in camera | | | | | |
+| | OBS Virtual Camera playing a video | | | | | |
+| | OBS Virtual Camera playing a video, label hidden or renamed | | | | | |
+| | OBS Virtual Camera showing a still image | | | | | |
+
+**Acceptance:** every built-in camera stays low (8 to 18), and OBS playing a video scores clearly higher even with its label hidden. If OBS with a hidden label only reaches 8, record which values matched a real camera. Likely culprits are the jitter and the repeated-frame ratio. Then adjust `CAMERA_FLAGS` in `lib/injection.ts` and its tests.
+
+## Live dashboard and presenter labels (added October 17, 2026)
+
+`/admin/` now reads the verification server when `NEXT_PUBLIC_API_URL` is set. The operator types the admin token, which is kept in that tab's `sessionStorage` and never bundled. The page loads recent sessions, streams new and changed ones over Server-Sent Events, and builds the KPI cards and a "Team test sessions" table from `GET /api/admin/summary`. That table counts only sessions with a presenter label and a decision, so each row adds up. Unlabeled visitor sessions and undecided sessions are listed in a footnote, not counted. Labels are chosen on `/verify/?demo=1` and never used for scoring. With no server configured, or the server unreachable, the page falls back to the labeled mock fixtures.
+
+### Executed
+
+- `npm run check` passed, including `tests/dashboard.test.ts`: results table, KPIs, row merging, stream parsing, the per-challenge timing summary, and token storage when storage is blocked. The backend suite passed unchanged (58 tests).
+- **Acceptance run** on Linux with the real backend (`uvicorn`, local SQLite) and a production build pointed at it. Headless Chromium used its synthetic camera, so every challenge was skipped and no face was measured. The admin page was open and connected in a second tab:
+
+| Presenter label | Row on /admin/ | Decision on /admin/ after the result page | Risk / decision / coverage |
+| --- | --- | --- | --- |
+| genuine | Already present when the challenges began (created at session start) | 2 ms | 50 / Step-up / 20 |
+| phone replay | Already present | 2 ms | 50 / Step-up / 20 |
+| virtual camera | Already present | 1 ms | 50 / Step-up / 20 |
+
+  The results card showed n = 3, one Step-up per label, and the KPI cards showed 3 sessions and 3 step-ups. Clicking a row opened the compact result view with its timing table. Reloading the page reconnected from the stored token. With the backend stopped, a reload showed "The verification server is unreachable, so sample data is shown." Sample data was on, and the mock flow worked: 4 Reject rows, inspector opens.
+- These three sessions prove the plumbing, not detection: no real person or attack was presented.
+
+### NOT executed
+
+- The team's own labeled sessions with real people and real attacks. Use `/verify/?demo=1`, pick the label before enabling the webcam, and read the counts from "Team test sessions". Keep its subheading: it is a small sample on our own devices, not a benchmark.
+- A deployed run. `vercel.json` still has the placeholder API origin `https://aegis-api.example.com` in `connect-src`. Replace it with the real API origin before deploying (DEPLOYMENT.md, step 11).
+
 ## Security/evaluation status
 
 No labeled deepfake benchmark, anti-spoofing certification, penetration test, demographic evaluation, calibrated probability, independence proof, or accessibility certification was performed. All fixture risks and policy weights are illustrative. A high-risk live heuristic is not proof of fraud. A low-risk synthetic fixture is not proof of a person's identity. The frontend is client-tamperable and must not authorize access.

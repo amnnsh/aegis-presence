@@ -8,6 +8,8 @@ import type {
 
 import { extractHeadPose } from "./head-pose.ts";
 import { lockCamera, unlockCamera } from "./reflection.ts";
+import { frameTimingStats, grayHash, summarizeCapabilities } from "./injection.ts";
+import type { FrameSample } from "./injection.ts";
 import type { CameraLockKey } from "./reflection.ts";
 
 type Detector = {
@@ -92,6 +94,10 @@ export class BrowserVision {
   private lastDeviceAt = 0;
 
   private metadata: DeviceEvidence | null = null;
+
+  // Frame-timing sample for camera integrity: first ~3 s only, then one summary.
+  private timingSamples: FrameSample[] | null = [];
+  private timingCanvas: HTMLCanvasElement | null = null;
 
   // rPPG sampling state
   private pulseSamples: RGBSample[] | null = null;
@@ -334,12 +340,29 @@ export class BrowserVision {
 
     const settings = track.getSettings();
 
+    // A count of video inputs only: deviceId and labels of other devices are never read.
+    const videoInputCount = await navigator.mediaDevices.enumerateDevices()
+      .then(devices => devices.filter(d => d.kind === "videoinput").length)
+      .catch(() => null);
+
+    if (this.cancelled) return;
+
+    let capabilities: DeviceEvidence["capabilities"] = null;
+    try {
+      capabilities = summarizeCapabilities(track.getCapabilities?.());
+    } catch {
+      capabilities = null;
+    }
+
     this.metadata = {
       label: track.label || "",
       width: settings.width ?? null,
       height: settings.height ?? null,
       declaredFps: settings.frameRate ?? null,
-      observedFps: null
+      observedFps: null,
+      capabilities,
+      videoInputCount,
+      frameTiming: null
     };
 
     this.callbacks.device({ ...this.metadata });
@@ -455,12 +478,43 @@ export class BrowserVision {
           this.lastDeviceAt = now;
         }
 
+        if (this.timingSamples) {
+          this.sampleTiming(now, frame.mediaTime);
+        }
+
         if (this.pulseSamples) {
           this.samplePulse(now);
         }
 
         this.measureFrames();
       });
+  }
+
+  /**
+   * Hash a 16x12 grayscale thumbnail of the current frame and record its media time.
+   * After ~3 s (at least 60 frames, at most 5 s) publish ONE summary through the device callback.
+   */
+  private sampleTiming(now: number, mediaTime: number): void {
+    const video = this.video;
+    const samples = this.timingSamples;
+    if (!video || !samples) return;
+
+    this.timingCanvas ??= Object.assign(document.createElement("canvas"), { width: 16, height: 12 });
+    const ctx = this.timingCanvas.getContext("2d", { willReadFrequently: true });
+    if (ctx && Number.isFinite(mediaTime)) {
+      ctx.drawImage(video, 0, 0, 16, 12);
+      samples.push({ mediaTimeMs: mediaTime * 1000, hash: grayHash(ctx.getImageData(0, 0, 16, 12).data) });
+    }
+
+    const elapsed = now - this.firstFrameAt;
+    if ((elapsed >= 3000 && samples.length >= 60) || elapsed >= 5000) {
+      this.timingSamples = null;
+      this.timingCanvas = null;
+      if (this.metadata) {
+        this.metadata.frameTiming = frameTimingStats(samples);
+        this.callbacks.device({ ...this.metadata });
+      }
+    }
   }
 
   /**
@@ -671,6 +725,8 @@ export class BrowserVision {
     this.detector = null;
 
     this.metadata = null;
+    this.timingSamples = null;
+    this.timingCanvas = null;
 
     this.stopPulse();
   }

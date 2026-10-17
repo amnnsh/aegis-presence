@@ -61,7 +61,8 @@ unreachable, the app completes in local-only mode and the result says "Local onl
 | `FRONTEND_ORIGIN` | `http://localhost:3000` | Used to build help-desk links. |
 
 `ADMIN_TOKEN` and `SIGNING_KEY_B64` are server secrets. Never put them in a `NEXT_PUBLIC_*` variable; the
-dashboard asks the operator to type the admin token and keeps it in memory only.
+dashboard asks the operator to type the admin token and keeps it in that tab's `sessionStorage` until they
+disconnect or close the tab. It is never part of the site bundle.
 
 ## Endpoints
 
