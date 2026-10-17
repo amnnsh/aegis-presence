@@ -1056,6 +1056,31 @@ export function analyzePulse(samples: RGBSample[]): PulseResult {
     return primary;
   }
 
+  // With a longer capture, normal heart-rate drift or a brief disturbance can
+  // spread the full-record spectrum. Two independent half-recordings agreeing
+  // on the rate are stronger evidence than one attractive peak chosen from
+  // many short windows.
+  if (valid.length >= 2 && primary.quality.usableSeconds >= 27 &&
+    primary.quality.motionFraction <= 0.35) {
+    const midpoint = (valid[0].t + valid[valid.length - 1].t) / 2;
+    const first = evaluateSegment(valid.filter(sample => sample.t < midpoint), primary.quality);
+    const second = evaluateSegment(valid.filter(sample => sample.t >= midpoint), primary.quality);
+    if (first.bpm !== null && second.bpm !== null &&
+      first.risk !== null && second.risk !== null &&
+      Math.abs(first.bpm - second.bpm) <= 7) {
+      return {
+        ...second,
+        bpm: Math.round((first.bpm + second.bpm) * 5) / 10,
+        snrDb: first.snrDb !== null && second.snrDb !== null
+          ? Math.min(first.snrDb, second.snrDb) : second.snrDb,
+        risk: Math.max(45, first.risk, second.risk),
+        detail: `Matching pulse estimates in both halves of the ${Math.round(primary.quality.usableSeconds)}-second sample: ` +
+          `${Math.round(first.bpm)} and ${Math.round(second.bpm)} BPM. ` +
+          `Experimental optical estimate; not proof of liveness.`
+      };
+    }
+  }
+
   // If the user moved slightly during the first 1-3 seconds while settling
   // after clicking the prompt button, evaluate the trailing stable window
   // (provided overall motion is not excessive).
@@ -1081,7 +1106,7 @@ export function analyzePulse(samples: RGBSample[]): PulseResult {
 }
 
 /**
- * Lightweight live preview used during the 12-second countdown UI so the user
+ * Lightweight live preview used during the pulse countdown UI so the user
  * can see their pulse waveform and preliminary BPM estimate after ~4 seconds
  * while continuing to hold still for the full verification window.
  */
@@ -1089,12 +1114,17 @@ export function previewPulse(samples: RGBSample[]): {
   bpm: number | null;
   waveform: number[];
 } {
-  const full = analyzePulse(samples);
+  // Preview is called while new camera frames arrive. Keep its work bounded
+  // when the capture lasts 35 seconds so signal analysis does not itself
+  // lower the observed frame rate.
+  const lastTime = samples[samples.length - 1]?.t ?? 0;
+  const recentSamples = samples.filter(sample => sample.t >= lastTime - 12000);
+  const full = analyzePulse(recentSamples);
   if (full.bpm !== null && full.waveform.length > 0) {
     return { bpm: full.bpm, waveform: full.waveform };
   }
 
-  const valid = samples.filter(finiteSample)
+  const valid = recentSamples.filter(finiteSample)
     .sort((a, b) => a.t - b.t);
 
   if (valid.length < 2) return { bpm: null, waveform: [] };
