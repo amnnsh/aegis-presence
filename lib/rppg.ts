@@ -89,6 +89,24 @@ function finiteSample(s: RGBSample): boolean {
     );
 }
 
+/** Flag strong backlighting from the most recent camera samples. */
+export function pulseLightingGuidance(samples: RGBSample[]): string | null {
+  const paired = samples.filter(sample =>
+    Number.isFinite(sample.t) &&
+    Number.isFinite(sample.gForehead) && (sample.gForehead ?? 0) > 0 &&
+    Number.isFinite(sample.gBackground) && (sample.gBackground ?? 0) > 0
+  );
+  if (paired.length < 20) return null;
+  const latest = paired[paired.length - 1].t;
+  const recent = paired.filter(sample => sample.t >= latest - 1500);
+  if (recent.length < 12 || recent[recent.length - 1].t - recent[0].t < 1000) return null;
+  const faceMean = mean(recent.map(sample => sample.gForehead!));
+  const backgroundMean = mean(recent.map(sample => sample.gBackground!));
+  return backgroundMean / faceMean > 1.35
+    ? "The area beside your face is much brighter than your forehead. Move a soft light in front of you or turn away from bright lights behind you, then retry."
+    : null;
+}
+
 /** Resample irregular RGB observations onto a uniform time grid. */
 export function resample(
   samples: RGBSample[],
@@ -944,19 +962,8 @@ export function analyzePulse(samples: RGBSample[]): PulseResult {
     }
   }
 
-  const paired = valid.filter(sample =>
-    Number.isFinite(sample.gForehead) && Number.isFinite(sample.gBackground)
-  );
-  if (paired.length >= 30) {
-    const faceMean = mean(paired.map(sample => sample.gForehead!));
-    const backgroundMean = mean(paired.map(sample => sample.gBackground!));
-    if (faceMean > 0 && backgroundMean / faceMean > 1.35) {
-      return {
-        ...primary,
-        detail: `${primary.detail} The area beside your face is much brighter than your forehead. Try a soft light in front of you and avoid bright lights behind you.`
-      };
-    }
-  }
+  const lighting = pulseLightingGuidance(valid);
+  if (lighting) return { ...primary, detail: `${primary.detail} ${lighting}` };
   return primary;
 }
 
