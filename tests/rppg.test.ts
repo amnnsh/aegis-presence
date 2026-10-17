@@ -414,3 +414,58 @@ test("irregular rhythm is rejected even with strong amplitude", () => {
     );
   }
 });
+
+/** Weak color changes and periodic lighting need different outcomes. */
+function lowAmplitudeFixture(kind: "face" | "lit-photo"): RGBSample[] {
+  const samples: RGBSample[] = [];
+  let seed = 1;
+  const random = () => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed / 4294967296 - 0.5;
+  };
+  let t = 0;
+  let frame = 0;
+  while (t < 18000) {
+    const seconds = t / 1000;
+    const beat = Math.sin(2 * Math.PI * 1.23 * seconds) +
+      0.25 * Math.sin(4 * Math.PI * 1.23 * seconds - 0.8);
+    const noise = 0.35;
+    const shared = random() * noise;
+    if (kind === "face") {
+      const light = 1 + 0.003 * Math.sin(2 * Math.PI * 0.27 * seconds);
+      samples.push({
+        t,
+        r: 145 * light - 0.0125 * beat + random() * noise,
+        g: 118 * light - 0.05 * beat + shared,
+        b: 96 * light - 0.0075 * beat + random() * noise,
+        gForehead: 118 * light - 0.05 * beat + shared,
+        motion: false
+      });
+    } else {
+      // A periodic lamp modulates all channels equally on a static image.
+      const light = 1 + 0.05 * Math.sin(2 * Math.PI * 1.23 * seconds);
+      samples.push({
+        t,
+        r: 145 * light + random() * noise,
+        g: 118 * light + shared,
+        b: 96 * light + random() * noise,
+        gForehead: 118 * light + shared,
+        motion: false
+      });
+    }
+    t += 1000 / (28 + frame % 4);
+    frame++;
+  }
+  return samples;
+}
+
+test("very weak 74 BPM forehead pulse remains measurable", () => {
+  const result = analyzePulse(lowAmplitudeFixture("face"));
+  assert.ok(result.bpm !== null && Math.abs(result.bpm - 74) < 5, result.detail);
+  assert.ok(result.risk !== null && result.risk <= 50, result.detail);
+});
+
+test("periodic illumination of a still image is not accepted as a pulse", () => {
+  const result = analyzePulse(lowAmplitudeFixture("lit-photo"));
+  assert.equal(result.risk, null, result.detail);
+});
