@@ -1,22 +1,29 @@
+
 name: Frontend checks
+
 on:
   push:
     branches: [main]
   pull_request:
+
 permissions:
   contents: read
+
 jobs:
   validate:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+
       - uses: actions/setup-node@v7
         with:
           node-version: 24
           package-manager-cache: false
+
       - name: Install dependencies
         run: |
           if [ -f package-lock.json ]; then
@@ -25,33 +32,62 @@ jobs:
             echo "Commit package-lock.json after your first successful npm install."
             npm install
           fi
+
+      # Run TypeScript, unit tests, and build
+      # the default static frontend.
       - name: Type-check, unit-test, and build
         run: npm run check
+
       - name: Install browser test runtime
         run: npx playwright install --with-deps chromium firefox
+
       - name: Provide an audio device for headless Firefox
         run: |
           sudo apt-get install -y pulseaudio
           pulseaudio --start --exit-idle-time=-1
           pactl load-module module-null-sink sink_name=ci_audio
           pactl set-default-sink ci_audio
+
+      # Run existing browser tests against
+      # the default local-only frontend.
+      # playwright.config.ts excludes Gemini tests.
       - name: Check static export and speech capture in Chromium and Firefox
         run: npm run test:browser
+
+      # Rebuild frontend using a test-only API origin.
+      # No actual backend is required on port 8001.
+      - name: Build frontend for mocked Gemini browser tests
+        env:
+          NEXT_PUBLIC_API_URL: http://localhost:8001
+        run: npm run build
+
+      # Run Gemini integration tests separately.
+      # Playwright intercepts the API requests.
+      - name: Check Gemini browser integration
+        env:
+          NEXT_PUBLIC_API_URL: http://localhost:8001
+        run: npx playwright test --config=playwright.gemini.config.ts --workers=1
+
   backend:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+
     defaults:
       run:
         working-directory: backend
+
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
+
       - name: API and policy-parity tests
         run: pytest -q
-
+        
