@@ -469,3 +469,52 @@ test("periodic illumination of a still image is not accepted as a pulse", () => 
   const result = analyzePulse(lowAmplitudeFixture("lit-photo"));
   assert.equal(result.risk, null, result.detail);
 });
+
+function backgroundReferenceFixture(hasPulse: boolean): RGBSample[] {
+  const samples: RGBSample[] = [];
+  let seed = 1;
+  const random = () => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed / 4294967296 - 0.5;
+  };
+  let t = 0;
+  let frame = 0;
+  while (t < 18000) {
+    const seconds = t / 1000;
+    const beat = hasPulse
+      ? Math.sin(2 * Math.PI * 1.23 * seconds) +
+        0.25 * Math.sin(4 * Math.PI * 1.23 * seconds - 0.8)
+      : 0;
+    const light = 1 +
+      0.02 * Math.sin(2 * Math.PI * 1.8 * seconds) +
+      0.004 * Math.sin(2 * Math.PI * 0.27 * seconds);
+    const shared = random() * 0.35;
+    const background = 100 * light + random() * 0.02;
+    samples.push({
+      t,
+      r: 145 * light - 0.0125 * beat + random() * 0.35,
+      g: 118 * light - 0.05 * beat + shared,
+      b: 96 * light - 0.0075 * beat + random() * 0.35,
+      gForehead: 118 * light - 0.05 * beat + shared,
+      gBackground: background,
+      motion: false
+    });
+    // About 15 captured frames per second, matching a common laptop webcam.
+    t += 1000 / (14 + frame % 3);
+    frame++;
+  }
+  return samples;
+}
+
+test("background reference recovers a weak pulse amid room-light flicker", () => {
+  const result = analyzePulse(backgroundReferenceFixture(true));
+  assert.ok(result.bpm !== null && Math.abs(result.bpm - 74) < 5, result.detail);
+  assert.ok(result.risk !== null && result.risk <= 50, result.detail);
+  assert.match(result.detail, /Background-corrected/);
+});
+
+test("background reference does not make flickering still images pass", () => {
+  const result = analyzePulse(backgroundReferenceFixture(false));
+  assert.equal(result.risk, null, result.detail);
+});
+
