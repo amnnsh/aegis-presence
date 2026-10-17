@@ -1,3 +1,9 @@
+export interface RGBRegion {
+  r: number;
+  g: number;
+  b: number;
+}
+
 export interface RGBSample {
   t: number; // Milliseconds, monotonic clock
   r: number;
@@ -8,6 +14,8 @@ export interface RGBSample {
   gForehead?: number;
   /** Green-channel mean from nearby non-face patches, when available. */
   gBackground?: number;
+  /** Independent forehead and cheek means, retained only as numeric samples. */
+  regions?: RGBRegion[];
 }
 
 export interface PulseQuality {
@@ -125,6 +133,13 @@ export function resample(
       ...(a.gBackground != null && b.gBackground != null
         ? { gBackground: a.gBackground + (b.gBackground - a.gBackground) * fraction }
         : {}),
+      ...(a.regions && b.regions && a.regions.length === b.regions.length
+        ? { regions: a.regions.map((region, index) => ({
+          r: region.r + (b.regions![index].r - region.r) * fraction,
+          g: region.g + (b.regions![index].g - region.g) * fraction,
+          b: region.b + (b.regions![index].b - region.b) * fraction
+        })) }
+        : {}),
       motion: Boolean(a.motion || b.motion)
     });
   }
@@ -186,13 +201,13 @@ export function bandpassCardiac(
 }
 
 /** POS: Plane-Orthogonal-to-Skin pulse extraction with outlier-window suppression and cardiac bandpass filtering. */
-export function extractPOS(samples: RGBSample[]): number[] {
+export function extractPOS(samples: RGBSample[], fps = SAMPLE_RATE): number[] {
   const length = samples.length;
   const output = new Array<number>(length).fill(0);
   const counts = new Array<number>(length).fill(0);
 
   const windowSize = Math.round(
-    WINDOW_SECONDS * SAMPLE_RATE
+    WINDOW_SECONDS * fps
   );
   const stride = Math.max(1, Math.floor(windowSize / 2));
 
@@ -250,7 +265,7 @@ export function extractPOS(samples: RGBSample[]): number[] {
     counts[i] ? v / counts[i] : 0
   );
 
-  const filtered = bandpassCardiac(raw, SAMPLE_RATE);
+  const filtered = bandpassCardiac(raw, fps);
 
   // Soft-clip isolated sample spikes using MAD scale estimation
   const madSigma = median(filtered.map(v => Math.abs(v))) * 1.4826;
@@ -439,20 +454,20 @@ function interBeatRegularity(pulse: number[], fps: number): number {
  * A lamp changes normalized R, G and B together; blood-volume absorption
  * changes green more strongly. This is supporting evidence, not proof of life.
  */
-function chromaticFraction(samples: RGBSample[], bpm: number): number {
-  const uniform = resample(samples);
+function chromaticFraction(samples: RGBSample[], bpm: number, fps = SAMPLE_RATE): number {
+  const uniform = resample(samples, fps);
   if (uniform.length < 2) return 0;
   const frequency = bpm / 60;
   const projection = (channel: "r" | "g" | "b"): [number, number] => {
     const average = mean(uniform.map(sample => sample[channel]));
     const filtered = bandpassCardiac(
       uniform.map(sample => sample[channel] / Math.max(1e-9, average)),
-      SAMPLE_RATE
+      fps
     );
     let real = 0;
     let imaginary = 0;
     for (let i = 0; i < filtered.length; i++) {
-      const angle = 2 * Math.PI * frequency * i / SAMPLE_RATE;
+      const angle = 2 * Math.PI * frequency * i / fps;
       real += filtered[i] * Math.cos(angle);
       imaginary -= filtered[i] * Math.sin(angle);
     }
@@ -487,22 +502,23 @@ function evaluateGreenFallback(
     const green = sample.gForehead!;
     return { ...sample, r: green, g: green, b: green };
   });
-  const uniform = resample(greenSamples);
+  const rate = Math.min(SAMPLE_RATE, Math.round(fps));
+  const uniform = resample(greenSamples, rate);
   const pulse = bandpassCardiac(
     uniform.map(sample => sample.g / greenMean),
-    SAMPLE_RATE
+    rate
   );
   const amplitude = std(pulse);
   if (amplitude < AMPLITUDE_FLOOR) return null;
 
-  const frequency = estimateFrequency(pulse);
+  const frequency = estimateFrequency(pulse, rate);
   if (
     !frequency ||
     frequency.spectralPurity < SPECTRAL_PURITY_MIN ||
     frequency.snrDb < SNR_MARGINAL_DB
   ) return null;
 
-  const regularity = interBeatRegularity(pulse, SAMPLE_RATE);
+  const regularity = interBeatRegularity(pulse, rate);
   if (regularity < IBI_REGULARITY_MIN) return null;
 
   const { bpm, snrDb, spectralPurity } = frequency;
@@ -510,7 +526,7 @@ function evaluateGreenFallback(
   // interpolation and a windowed spectrum. Guard this fallback against a
   // synchronized lighting oscillation on a still image.
   // https://github.com/advithya/webcam-pulse-detector (Apache-2.0)
-  if (chromaticFraction(valid, bpm) < 0.15) return null;
+  if (chromaticFraction(valid, bpm, rate) < 0.15) return null;
   const risk =
     snrDb >= SNR_CONFIDENT_DB &&
     spectralPurity >= SPECTRAL_PURITY_CONFIDENT &&
@@ -518,7 +534,7 @@ function evaluateGreenFallback(
       ? 15
       : 45;
 
-  const lastSixSeconds = pulse.slice(-SAMPLE_RATE * 6);
+  const lastSixSeconds = pulse.slice(-rate * 6);
   const average = mean(lastSixSeconds);
   const scale = Math.max(1e-9, std(lastSixSeconds));
   return {
@@ -548,12 +564,13 @@ function evaluateBackgroundCorrected(
   const duration = (paired[paired.length - 1].t - paired[0].t) / 1000;
   if (duration < MIN_SECONDS || (paired.length - 1) / duration < 12) return null;
 
-  const uniform = resample(paired);
+  const rate = Math.min(SAMPLE_RATE, Math.round((paired.length - 1) / duration));
+  const uniform = resample(paired, rate);
   const foreheadMean = mean(uniform.map(sample => sample.gForehead!));
   const backgroundMean = mean(uniform.map(sample => sample.gBackground!));
   if (foreheadMean <= 0 || backgroundMean <= 0) return null;
-  const face = bandpassCardiac(uniform.map(sample => sample.gForehead! / foreheadMean));
-  const background = bandpassCardiac(uniform.map(sample => sample.gBackground! / backgroundMean));
+  const face = bandpassCardiac(uniform.map(sample => sample.gForehead! / foreheadMean), rate);
+  const background = bandpassCardiac(uniform.map(sample => sample.gBackground! / backgroundMean), rate);
   const backgroundVariance = std(background) ** 2;
   if (backgroundVariance < 1e-12) return null;
   const covariance = mean(face.map((value, index) => value * background[index]));
@@ -565,18 +582,18 @@ function evaluateBackgroundCorrected(
   if (correlation < 0.45) return null;
   const pulse = bandpassCardiac(uniform.map(sample =>
     sample.gForehead! / foreheadMean - sample.gBackground! / backgroundMean
-  ));
+  ), rate);
   if (std(pulse) < AMPLITUDE_FLOOR) return null;
-  const frequency = estimateFrequency(pulse);
+  const frequency = estimateFrequency(pulse, rate);
   if (!frequency ||
     frequency.spectralPurity < SPECTRAL_PURITY_MIN ||
     frequency.snrDb < SNR_MARGINAL_DB) return null;
-  const regularity = interBeatRegularity(pulse, SAMPLE_RATE);
+  const regularity = interBeatRegularity(pulse, rate);
   if (regularity < IBI_REGULARITY_MIN) return null;
   const { bpm, snrDb, spectralPurity } = frequency;
-  if (chromaticFraction(paired, bpm) < 0.15) return null;
+  if (chromaticFraction(paired, bpm, rate) < 0.15) return null;
 
-  const lastSixSeconds = pulse.slice(-SAMPLE_RATE * 6);
+  const lastSixSeconds = pulse.slice(-rate * 6);
   const average = mean(lastSixSeconds);
   const scale = Math.max(1e-9, std(lastSixSeconds));
   return {
@@ -589,6 +606,83 @@ function evaluateBackgroundCorrected(
       `Background-corrected forehead pulse estimate: ${Math.round(bpm)} BPM, ` +
       `SNR ${snrDb.toFixed(1)} dB, spectral purity ${(spectralPurity * 100).toFixed(0)}%, ` +
       `rhythm regularity ${(regularity * 100).toFixed(0)}%. ` +
+      `Experimental optical estimate; not proof of liveness.`
+  };
+}
+
+/** Accept a weak regional estimate only when two skin patches agree. */
+function evaluateRegionalConsensus(
+  valid: RGBSample[],
+  quality: PulseQuality
+): PulseResult | null {
+  const complete = valid.filter(sample =>
+    sample.regions?.length === 3 &&
+    sample.regions.every(region =>
+      [region.r, region.g, region.b].every(value => Number.isFinite(value) && value > 0)
+    ) && Number.isFinite(sample.gBackground) && (sample.gBackground ?? 0) > 0
+  );
+  if (complete.length < 2) return null;
+  const duration = (complete[complete.length - 1].t - complete[0].t) / 1000;
+  const fps = duration > 0 ? (complete.length - 1) / duration : 0;
+  if (duration < MIN_SECONDS || fps < 12) return null;
+  const rate = Math.min(SAMPLE_RATE, Math.round(fps));
+
+  const background = resample(complete, rate);
+  const backgroundMean = mean(background.map(sample => sample.gBackground!));
+  if (backgroundMean <= 0) return null;
+  const backgroundPulse = bandpassCardiac(
+    background.map(sample => sample.gBackground! / backgroundMean), rate
+  );
+  const backgroundPeak = estimateFrequency(backgroundPulse, rate);
+
+  const candidates: {
+    bpm: number;
+    snrDb: number;
+    pulse: number[];
+    patch: number;
+  }[] = [];
+  for (let patch = 0; patch < 3; patch++) {
+    const regionSamples = complete.map(sample => ({
+      t: sample.t,
+      ...sample.regions![patch],
+      motion: sample.motion
+    }));
+    const pulse = extractPOS(resample(regionSamples, rate), rate);
+    if (std(pulse) < AMPLITUDE_FLOOR) continue;
+    const frequency = estimateFrequency(pulse, rate);
+    if (!frequency || frequency.snrDb < SNR_MARGINAL_DB ||
+      frequency.spectralPurity < SPECTRAL_PURITY_MIN ||
+      interBeatRegularity(pulse, rate) < IBI_REGULARITY_MIN ||
+      chromaticFraction(regionSamples, frequency.bpm, rate) < 0.15) continue;
+    candidates.push({ ...frequency, pulse, patch });
+  }
+
+  let pair: typeof candidates | null = null;
+  for (let i = 0; i < candidates.length; i++) {
+    for (let j = i + 1; j < candidates.length; j++) {
+      if (Math.abs(candidates[i].bpm - candidates[j].bpm) <= 7 &&
+        (!pair || candidates[i].snrDb + candidates[j].snrDb >
+          pair[0].snrDb + pair[1].snrDb)) {
+        pair = [candidates[i], candidates[j]];
+      }
+    }
+  }
+  if (!pair) return null;
+  const bpm = (pair[0].bpm + pair[1].bpm) / 2;
+  if (backgroundPeak && backgroundPeak.snrDb >= 0 &&
+    Math.abs(backgroundPeak.bpm - bpm) <= 7) return null;
+
+  const pulse = pair[0].snrDb >= pair[1].snrDb ? pair[0].pulse : pair[1].pulse;
+  const tail = pulse.slice(-rate * 6);
+  const average = mean(tail);
+  const scale = Math.max(1e-9, std(tail));
+  return {
+    bpm: Math.round(bpm * 10) / 10,
+    snrDb: Math.round(Math.min(pair[0].snrDb, pair[1].snrDb) * 10) / 10,
+    quality,
+    waveform: tail.map(value => (value - average) / scale),
+    risk: 45,
+    detail: `Matching pulse estimates in two face regions: ${Math.round(bpm)} BPM. ` +
       `Experimental optical estimate; not proof of liveness.`
   };
 }
@@ -633,8 +727,11 @@ function evaluateSegment(
   const alternative = (detail: string): PulseResult => {
     const green = evaluateGreenFallback(valid, quality);
     const corrected = evaluateBackgroundCorrected(valid, quality);
-    if (green && corrected) return green.risk! < corrected.risk! ? green : corrected;
-    return green ?? corrected ?? unavailable(detail);
+    const regional = evaluateRegionalConsensus(valid, quality);
+    const candidates = [green, corrected, regional].filter(
+      (result): result is PulseResult => result !== null
+    );
+    return candidates.sort((a, b) => a.risk! - b.risk!)[0] ?? unavailable(detail);
   };
 
   // Try POS first; independent green-only forehead sampling is a fallback for
@@ -647,8 +744,9 @@ function evaluateSegment(
     );
   }
 
-  const uniform = resample(valid);
-  const pulse = extractPOS(uniform);
+  const rate = Math.min(SAMPLE_RATE, Math.round(fps));
+  const uniform = resample(valid, rate);
+  const pulse = extractPOS(uniform, rate);
   const pulseAmplitude = std(pulse);
   if (pulseAmplitude < AMPLITUDE_FLOOR) {
     return alternative(
@@ -656,7 +754,7 @@ function evaluateSegment(
     );
   }
 
-  const frequency = estimateFrequency(pulse);
+  const frequency = estimateFrequency(pulse, rate);
   if (!frequency) {
     return alternative("No measurable pulse-frequency peak was found.");
   }
@@ -668,7 +766,7 @@ function evaluateSegment(
     );
   }
 
-  const regularity = interBeatRegularity(pulse, SAMPLE_RATE);
+  const regularity = interBeatRegularity(pulse, rate);
   if (regularity < IBI_REGULARITY_MIN) {
     return alternative(
       "Pulse rhythm is irregular — inter-beat intervals are inconsistent with a physiological heartbeat."
@@ -686,7 +784,7 @@ function evaluateSegment(
         ? 45
         : 80;
 
-  const lastSixSeconds = pulse.slice(-SAMPLE_RATE * 6);
+  const lastSixSeconds = pulse.slice(-rate * 6);
   const average = mean(lastSixSeconds);
   const scale = Math.max(1e-9, std(lastSixSeconds));
   const posResult: PulseResult = {
@@ -785,14 +883,15 @@ export function previewPulse(samples: RGBSample[]): {
     return { bpm: null, waveform: [] };
   }
 
-  const uniform = resample(valid);
-  const pulse = extractPOS(uniform);
+  const rate = Math.min(SAMPLE_RATE, Math.round(fps));
+  const uniform = resample(valid, rate);
+  const pulse = extractPOS(uniform, rate);
   if (std(pulse) < AMPLITUDE_FLOOR) {
     return { bpm: null, waveform: [] };
   }
 
-  const freq = estimateFrequency(pulse, SAMPLE_RATE, PREVIEW_MIN_SECONDS);
-  const slice = pulse.slice(-SAMPLE_RATE * 6);
+  const freq = estimateFrequency(pulse, rate, PREVIEW_MIN_SECONDS);
+  const slice = pulse.slice(-rate * 6);
   const avg = mean(slice);
   const scale = Math.max(1e-9, std(slice));
   const waveform = slice.map(v => (v - avg) / scale);
