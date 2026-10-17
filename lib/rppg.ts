@@ -1,4 +1,3 @@
-
 export interface RGBSample {
   t: number; // Milliseconds, monotonic clock
   r: number;
@@ -23,22 +22,34 @@ export interface PulseResult {
 }
 
 const SAMPLE_RATE = 30;
-const MIN_SECONDS = 8;
+const MIN_SECONDS = 7.5;
+const PREVIEW_MIN_SECONDS = 3.5;
 const LOW_HZ = 0.7;
 const HIGH_HZ = 3.0;
+const PHYSIOLOGICAL_LOW_HZ = 0.75;  // 45 BPM
+const PHYSIOLOGICAL_HIGH_HZ = 2.5;  // 150 BPM
 const WINDOW_SECONDS = 1.6;
 
 /**
- * Anti-spoofing thresholds.
- * A still image (photo/printout) held in front of the camera lacks real
- * blood-flow-driven skin-color oscillation. These checks reject such fakes.
+ * Calibrated anti-spoofing thresholds.
+ *
+ * Real facial skin in 8-bit webcam video exhibits subtle cardiac pulsatile
+ * fluctuations (~0.1–1.5 RGB units around a 90–180 DC level, i.e. ~0.08%–1.5%
+ * green-channel coefficient of variation and ~0.001–0.015 POS amplitude).
+ *
+ * A still image (printed photo or static screen) lacks chromatic blood-flow
+ * oscillation: stationary photos only have uncorrelated camera sensor noise,
+ * while hand-held photos modulate R, G, and B proportionally (which cancels
+ * in the Plane-Orthogonal-to-Skin projection).
  */
-const SNR_CONFIDENT_DB = 5;       // raised from 3; noise on a photo can hit ~3 dB
-const SNR_MARGINAL_DB = 1;        // below this = no detectable pulse
-const GREEN_VARIANCE_FLOOR = 0.06; // minimum σ of normalized green channel
-const AMPLITUDE_FLOOR = 0.002;     // minimum σ of the POS pulse waveform
-const SPECTRAL_PURITY_MIN = 0.25;  // peak-band must carry ≥25 % of in-band power
-const IBI_REGULARITY_MIN = 0.65;   // min ratio of consistent inter-beat intervals
+const SNR_CONFIDENT_DB = 5;
+const SNR_MARGINAL_DB = 1;
+const GREEN_VARIANCE_FLOOR = 0.00048;
+const AMPLITUDE_FLOOR = 0.00075;
+const SPECTRAL_PURITY_MIN = 0.35;
+const SPECTRAL_PURITY_CONFIDENT = 0.50;
+const IBI_REGULARITY_MIN = 0.52;
+const IBI_REGULARITY_CONFIDENT = 0.65;
 
 function mean(values: number[]): number {
   return values.reduce((sum, v) => sum + v, 0) /
@@ -48,6 +59,15 @@ function mean(values: number[]): number {
 function std(values: number[]): number {
   const m = mean(values);
   return Math.sqrt(mean(values.map(v => (v - m) ** 2)));
+}
+
+function median(values: number[]): number {
+  if (!values.length) return 0;
+  const sorted = values.slice().sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 !== 0
+    ? sorted[mid]
+    : (sorted[mid - 1] + sorted[mid]) / 2;
 }
 
 function finiteSample(s: RGBSample): boolean {
@@ -102,7 +122,60 @@ export function resample(
   return output;
 }
 
-/** POS: Plane-Orthogonal-to-Skin pulse extraction. */
+/**
+ * Zero-phase cardiac bandpass filter (~0.8–2.8 Hz at 30 FPS).
+ * 1. Subtracts a 1.1s moving average to remove slow baseline drift (<0.8 Hz)
+ *    from breathing and camera auto-exposure.
+ * 2. Applies two symmetric 5-tap triangular smoothing passes to attenuate
+ *    high-frequency camera sensor noise (>3 Hz) and 10 Hz landmark jitter.
+ */
+export function bandpassCardiac(
+  signal: number[],
+  fps = SAMPLE_RATE
+): number[] {
+  const n = signal.length;
+  if (n < 5) return signal.slice();
+
+  const hpWindow = Math.max(5, Math.round(fps * 1.1) | 1);
+  const halfHp = Math.floor(hpWindow / 2);
+  const detrended = new Array<number>(n);
+  let sum = 0;
+  let count = 0;
+
+  for (let i = 0; i < Math.min(n, halfHp); i++) {
+    sum += signal[i];
+    count++;
+  }
+
+  for (let i = 0; i < n; i++) {
+    if (i + halfHp < n) {
+      sum += signal[i + halfHp];
+      count++;
+    }
+    if (i - halfHp - 1 >= 0) {
+      sum -= signal[i - halfHp - 1];
+      count--;
+    }
+    detrended[i] = signal[i] - sum / Math.max(1, count);
+  }
+
+  const smooth5 = (arr: number[]): number[] => {
+    const out = new Array<number>(arr.length);
+    for (let i = 0; i < arr.length; i++) {
+      const m2 = arr[Math.max(0, i - 2)];
+      const m1 = arr[Math.max(0, i - 1)];
+      const c = arr[i];
+      const p1 = arr[Math.min(arr.length - 1, i + 1)];
+      const p2 = arr[Math.min(arr.length - 1, i + 2)];
+      out[i] = (m2 + 2 * m1 + 3 * c + 2 * p1 + p2) / 9;
+    }
+    return out;
+  };
+
+  return smooth5(smooth5(detrended));
+}
+
+/** POS: Plane-Orthogonal-to-Skin pulse extraction with outlier-window suppression and cardiac bandpass filtering. */
 export function extractPOS(samples: RGBSample[]): number[] {
   const length = samples.length;
   const output = new Array<number>(length).fill(0);
@@ -114,6 +187,8 @@ export function extractPOS(samples: RGBSample[]): number[] {
   const stride = Math.max(1, Math.floor(windowSize / 2));
 
   if (length < windowSize) return output;
+
+  const windows: { start: number; centered: number[]; sigma: number }[] = [];
 
   for (
     let start = 0;
@@ -135,30 +210,62 @@ export function extractPOS(samples: RGBSample[]): number[] {
     const alpha = std(s1) / Math.max(1e-9, std(s2));
     const pulse = s1.map((v, i) => v + alpha * s2[i]);
     const center = mean(pulse);
+    const centered = pulse.map(v => v - center);
+
+    windows.push({
+      start,
+      centered,
+      sigma: std(centered)
+    });
+  }
+
+  // Downweight transient motion/blink outlier windows so a brief twitch
+  // does not dominate the overlap-added waveform.
+  const medSigma = median(windows.map(w => w.sigma));
+  const capSigma = medSigma * 1.35;
+
+  for (const w of windows) {
+    const scale =
+      w.sigma > capSigma && w.sigma > 1e-9
+        ? (medSigma / w.sigma) ** 2
+        : 1;
 
     for (let i = 0; i < windowSize; i++) {
-      output[start + i] += pulse[i] - center;
-      counts[start + i]++;
+      output[w.start + i] += w.centered[i] * scale;
+      counts[w.start + i] += 1;
     }
   }
 
-  return output.map((v, i) =>
+  const raw = output.map((v, i) =>
     counts[i] ? v / counts[i] : 0
   );
+
+  const filtered = bandpassCardiac(raw, SAMPLE_RATE);
+
+  // Soft-clip isolated sample spikes using MAD scale estimation
+  const madSigma = median(filtered.map(v => Math.abs(v))) * 1.4826;
+  if (madSigma > 1e-9) {
+    const limit = madSigma * 1.8;
+    for (let i = 0; i < filtered.length; i++) {
+      if (filtered[i] > limit) filtered[i] = limit;
+      else if (filtered[i] < -limit) filtered[i] = -limit;
+    }
+  }
+
+  return filtered;
 }
 
 /**
  * Hann-windowed frequency analysis.
  * Computes the equivalent positive-frequency DFT bins.
- * For a 12-second sample this is inexpensive enough
- * for occasional processing, not per-frame execution.
  */
 export function estimateFrequency(
   signal: number[],
-  fps = SAMPLE_RATE
+  fps = SAMPLE_RATE,
+  minSeconds = MIN_SECONDS
 ): { bpm: number; snrDb: number; spectralPurity: number } | null {
   const n = signal.length;
-  if (n < fps * MIN_SECONDS) return null;
+  if (n < fps * minSeconds) return null;
 
   const center = mean(signal);
   const windowed = signal.map((v, i) =>
@@ -191,7 +298,13 @@ export function estimateFrequency(
 
   if (!bins.length) return null;
 
-  const peak = bins.reduce((a, b) =>
+  // Search for the primary cardiac fundamental within [0.75, 2.5 Hz] (45-150 BPM)
+  const physBins = bins.filter(
+    b => b.hz >= PHYSIOLOGICAL_LOW_HZ && b.hz <= PHYSIOLOGICAL_HIGH_HZ
+  );
+  const searchBins = physBins.length ? physBins : bins;
+
+  const peak = searchBins.reduce((a, b) =>
     b.power > a.power ? b : a
   );
 
@@ -201,12 +314,23 @@ export function estimateFrequency(
 
   if (totalPower < 1e-12) return null;
 
-  const signalPower = bins
-    .filter(b =>
-      Math.abs(b.hz - peak.hz) <= 0.1 ||
-      Math.abs(b.hz - 2 * peak.hz) <= 0.1
+  // Fundamental lobe (±0.12 Hz accommodates normal breathing HRV over 12s)
+  const fundamentalPower = bins
+    .filter(b => Math.abs(b.hz - peak.hz) <= 0.12)
+    .reduce((sum, b) => sum + b.power, 0);
+
+  // Second harmonic lobe (±0.08 Hz), capped at 40% of fundamental power so
+  // an unrelated high-frequency tone cannot masquerade as a harmonic
+  const harmonicPower = bins
+    .filter(
+      b =>
+        Math.abs(b.hz - 2 * peak.hz) <= 0.08 &&
+        Math.abs(b.hz - peak.hz) > 0.12
     )
     .reduce((sum, b) => sum + b.power, 0);
+
+  const signalPower =
+    fundamentalPower + Math.min(harmonicPower, 0.4 * fundamentalPower);
 
   const noisePower = Math.max(
     1e-12,
@@ -225,61 +349,85 @@ export function estimateFrequency(
 }
 
 /**
- * Check that the green channel has enough temporal variance.
- * Real skin under blood flow produces measurable green-channel oscillation.
- * A printed photo or static screen image has near-constant pixel values;
- * any variance comes only from camera sensor noise, which is much smaller.
+ * Check that the green channel has enough coherent temporal variance.
+ * Averaging 3 consecutive frames (~100 ms) retains >96% of a physiological
+ * cardiac wave while suppressing uncorrelated frame-to-frame camera sensor
+ * noise on a static image by √3.
  */
 function greenChannelVariance(samples: RGBSample[]): number {
-  if (samples.length < 2) return 0;
+  if (samples.length < 3) return 0;
   const greens = samples.map(s => s.g);
   const avg = mean(greens);
   if (avg < 1e-9) return 0;
-  // Normalized standard deviation (coefficient of variation)
-  return std(greens) / avg;
+  const smoothed = greens.map((_, i) =>
+    (
+      greens[Math.max(0, i - 1)] +
+      greens[i] +
+      greens[Math.min(greens.length - 1, i + 1)]
+    ) / 3
+  );
+  return std(smoothed) / avg;
 }
 
 /**
- * Count zero-crossings in the POS pulse waveform and check that
- * the inter-beat intervals are regular (a real heartbeat is rhythmic;
- * random noise peaks are not).
+ * Measure inter-beat interval (IBI) regularity on the bandpass-filtered
+ * POS pulse waveform.
  *
- * Returns a regularity score between 0 and 1, where 1 means perfectly
- * uniform intervals and 0 means chaotic/random.
+ * Uses negative-trough hysteresis (-0.20 σ) and a physiological refractory
+ * period (0.30 s, max 200 BPM) so camera noise ripples or dicrotic notches
+ * do not trigger false zero-crossings, and verifies both deviation from the
+ * median IBI (±28%) and beat-to-beat smoothness (≤35% jump between adjacent
+ * beats).
  */
 function interBeatRegularity(pulse: number[], fps: number): number {
-  // Find positive zero-crossings (rising edges)
+  const sigma = std(pulse);
+  if (sigma < 1e-9) return 0;
+
   const crossings: number[] = [];
+  let armed = true;
+  const minRefractorySec = 0.30;
+
   for (let i = 1; i < pulse.length; i++) {
-    if (pulse[i - 1] <= 0 && pulse[i] > 0) {
-      crossings.push(i / fps); // time in seconds
+    if (pulse[i] < -0.20 * sigma) {
+      armed = true;
+    }
+    if (armed && pulse[i - 1] <= 0 && pulse[i] > 0) {
+      const frac = -pulse[i - 1] / Math.max(1e-9, pulse[i] - pulse[i - 1]);
+      const tSec = (i - 1 + frac) / fps;
+      if (
+        crossings.length === 0 ||
+        tSec - crossings[crossings.length - 1] >= minRefractorySec
+      ) {
+        crossings.push(tSec);
+        armed = false;
+      }
     }
   }
   if (crossings.length < 3) return 0;
 
-  // Compute inter-beat intervals
   const intervals: number[] = [];
   for (let i = 1; i < crossings.length; i++) {
     intervals.push(crossings[i] - crossings[i - 1]);
   }
 
-  // Reject if intervals are outside the physiological range (40-180 BPM)
-  const medianIBI = intervals.slice().sort((a, b) => a - b)[Math.floor(intervals.length / 2)];
+  const medianIBI = median(intervals);
   if (medianIBI < 60 / 180 || medianIBI > 60 / 40) return 0;
 
-  // Check consistency: fraction of intervals within ±25% of the median
-  const tolerance = medianIBI * 0.25;
-  const consistent = intervals.filter(ibi =>
-    Math.abs(ibi - medianIBI) <= tolerance
+  const tolerance = medianIBI * 0.28;
+  const maxStep = medianIBI * 0.35;
+  const consistent = intervals.filter(
+    (ibi, i) =>
+      Math.abs(ibi - medianIBI) <= tolerance &&
+      (i === 0 || Math.abs(ibi - intervals[i - 1]) <= maxStep)
   ).length;
 
   return consistent / intervals.length;
 }
 
-export function analyzePulse(samples: RGBSample[]): PulseResult {
-  const valid = samples.filter(finiteSample)
-    .sort((a, b) => a.t - b.t);
-
+function evaluateSegment(
+  valid: RGBSample[],
+  qualityOverride?: PulseQuality
+): PulseResult {
   const duration = valid.length >= 2
     ? (valid[valid.length - 1].t - valid[0].t) / 1000
     : 0;
@@ -292,7 +440,7 @@ export function analyzePulse(samples: RGBSample[]): PulseResult {
     ? valid.filter(s => s.motion).length / valid.length
     : 1;
 
-  const quality = {
+  const quality = qualityOverride ?? {
     fps,
     usableSeconds: duration,
     motionFraction
@@ -309,16 +457,15 @@ export function analyzePulse(samples: RGBSample[]): PulseResult {
 
   if (
     duration < MIN_SECONDS ||
-    fps < 15 ||
-    motionFraction > 0.3
+    fps < 12 ||
+    motionFraction > 0.35
   ) {
     return unavailable(
       "Insufficient stable facial video. Hold still and retry."
     );
   }
 
-  // Anti-spoof check 1: green channel temporal variance.
-  // A still image has near-zero variance; real skin has measurable oscillation.
+  // Anti-spoof check 1: coherent green channel temporal variance.
   const greenVar = greenChannelVariance(valid);
   if (greenVar < GREEN_VARIANCE_FLOOR) {
     return unavailable(
@@ -330,9 +477,7 @@ export function analyzePulse(samples: RGBSample[]): PulseResult {
   const uniform = resample(valid);
   const pulse = extractPOS(uniform);
 
-  // Anti-spoof check 2: POS waveform amplitude.
-  // The extracted pulse signal must have meaningful oscillation, not just
-  // sub-pixel sensor noise amplified by the POS algorithm.
+  // Anti-spoof check 2: bandpass-filtered POS waveform amplitude.
   const pulseAmplitude = std(pulse);
   if (pulseAmplitude < AMPLITUDE_FLOOR) {
     return unavailable(
@@ -354,7 +499,7 @@ export function analyzePulse(samples: RGBSample[]): PulseResult {
   // Anti-spoof check 3: spectral purity.
   // A real heartbeat concentrates energy at the pulse frequency and its
   // harmonic. Camera noise on a photo spreads power across all frequencies.
-  if (spectralPurity < SPECTRAL_PURITY_MIN) {
+  if (spectralPurity < SPECTRAL_PURITY_MIN || snrDb < SNR_MARGINAL_DB) {
     return unavailable(
       "Spectral energy is spread across all frequencies — no dominant pulse. " +
       "This is consistent with sensor noise on a static image."
@@ -374,8 +519,11 @@ export function analyzePulse(samples: RGBSample[]): PulseResult {
 
   // Risk scoring with raised SNR thresholds.
   const risk =
-    snrDb >= SNR_CONFIDENT_DB && bpm >= 45 && bpm <= 150 &&
-    spectralPurity >= SPECTRAL_PURITY_MIN && regularity >= IBI_REGULARITY_MIN
+    snrDb >= SNR_CONFIDENT_DB &&
+    bpm >= 45 &&
+    bpm <= 150 &&
+    spectralPurity >= SPECTRAL_PURITY_CONFIDENT &&
+    regularity >= IBI_REGULARITY_CONFIDENT
       ? 15
       : snrDb >= SNR_MARGINAL_DB
         ? 45
@@ -400,5 +548,95 @@ export function analyzePulse(samples: RGBSample[]): PulseResult {
       `spectral purity ${(spectralPurity * 100).toFixed(0)}%, ` +
       `rhythm regularity ${(regularity * 100).toFixed(0)}%. ` +
       `Not medical-grade or validated spoof detection.`
+  };
+}
+
+export function analyzePulse(samples: RGBSample[]): PulseResult {
+  const valid = samples.filter(finiteSample)
+    .sort((a, b) => a.t - b.t);
+
+  const primary = evaluateSegment(valid);
+  if (primary.risk !== null) {
+    return primary;
+  }
+
+  // If the user moved slightly during the first 1-3 seconds while settling
+  // after clicking the prompt button, evaluate the trailing stable window
+  // (provided overall motion is not excessive).
+  if (valid.length >= 2 && primary.quality.motionFraction <= 0.4) {
+    const endT = valid[valid.length - 1].t;
+    const trailingStart = endT - 9000;
+    const trailing = valid.filter(s => s.t >= trailingStart && !s.motion);
+    if (trailing.length >= 2) {
+      const trailingDuration =
+        (trailing[trailing.length - 1].t - trailing[0].t) / 1000;
+      if (trailingDuration >= MIN_SECONDS) {
+        const fallback = evaluateSegment(trailing, primary.quality);
+        if (fallback.risk !== null) {
+          return fallback;
+        }
+      }
+    }
+  }
+
+  return primary;
+}
+
+/**
+ * Lightweight live preview used during the 12-second countdown UI so the user
+ * can see their pulse waveform and preliminary BPM estimate after ~4 seconds
+ * while continuing to hold still for the full verification window.
+ */
+export function previewPulse(samples: RGBSample[]): {
+  bpm: number | null;
+  waveform: number[];
+} {
+  const full = analyzePulse(samples);
+  if (full.bpm !== null && full.waveform.length > 0) {
+    return { bpm: full.bpm, waveform: full.waveform };
+  }
+
+  const valid = samples.filter(finiteSample)
+    .sort((a, b) => a.t - b.t);
+
+  if (valid.length < 2) return { bpm: null, waveform: [] };
+
+  const duration = (valid[valid.length - 1].t - valid[0].t) / 1000;
+  const fps = duration > 0 ? (valid.length - 1) / duration : 0;
+  const motionFraction =
+    valid.filter(s => s.motion).length / valid.length;
+
+  if (
+    duration < PREVIEW_MIN_SECONDS ||
+    fps < 12 ||
+    motionFraction > 0.45 ||
+    greenChannelVariance(valid) < GREEN_VARIANCE_FLOOR
+  ) {
+    return { bpm: null, waveform: [] };
+  }
+
+  const uniform = resample(valid);
+  const pulse = extractPOS(uniform);
+  if (std(pulse) < AMPLITUDE_FLOOR) {
+    return { bpm: null, waveform: [] };
+  }
+
+  const freq = estimateFrequency(pulse, SAMPLE_RATE, PREVIEW_MIN_SECONDS);
+  const slice = pulse.slice(-SAMPLE_RATE * 6);
+  const avg = mean(slice);
+  const scale = Math.max(1e-9, std(slice));
+  const waveform = slice.map(v => (v - avg) / scale);
+
+  if (
+    !freq ||
+    freq.spectralPurity < SPECTRAL_PURITY_MIN ||
+    freq.snrDb < SNR_MARGINAL_DB
+  ) {
+    return { bpm: null, waveform };
+  }
+
+  return {
+    bpm: Math.round(freq.bpm * 10) / 10,
+    waveform
   };
 }

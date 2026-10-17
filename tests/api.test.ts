@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { apiConfigured, openSession, parsePlan, planToChallenges, toDecisionResult } from "../lib/api.ts";
+import { apiConfigured, openSession, parsePlan, toDecisionResult } from "../lib/api.ts";
 import type { CompleteResponse, Plan } from "../lib/api.ts";
 import { evaluateRisk, SIGNALS } from "../lib/risk.ts";
 
@@ -13,8 +13,10 @@ test("without NEXT_PUBLIC_API_URL the app stays local-only and never throws", as
   assert.equal(apiConfigured(), false);
   assert.deepEqual(await openSession({ linkId: "anything" }), { session: null, notice: "" });
 });
-test("server plan keeps its order and digits when mapped onto today's challenges", () => {
-  assert.deepEqual(planToChallenges(plan), [{ kind: "digits", digits: "0427" }, { kind: "head", direction: "right" }, { kind: "blink" }]);
+test("cue offsets must fit inside the per-challenge timeout", () => {
+  const blink = (cue_offsets_ms: number[]) => ({ ...plan, challenges: [plan.challenges[0], plan.challenges[1], { id: "c_3", kind: "cued_blink" as const, cue_offsets_ms }] });
+  assert.ok(parsePlan(blink([1500, 5500, 9500])));
+  for (const bad of [[], [-1, 2000, 4000], [2000, 4000, 60000]]) assert.equal(parsePlan(blink(bad)), null);
 });
 test("malformed plans are refused", () => {
   assert.equal(parsePlan(plan), plan);
