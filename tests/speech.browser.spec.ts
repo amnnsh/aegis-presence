@@ -18,8 +18,24 @@ function productionWorkerUrl() {
   throw new Error("Cannot locate the production speech worker; update the test harness for this bundler output.");
 }
 
-test("quiet speech passes through microphone capture and the real speech worker", async ({ page }) => {
+test("quiet speech passes through microphone capture and the real speech worker", async ({ page }, testInfo) => {
   test.setTimeout(120_000);
+  if (testInfo.project.name === "mobile-chromium") test.skip(); // same Chromium worker; avoid loading Whisper twice in parallel
+  await page.addInitScript(() => {
+    (window as Window & { __aegisWorkerEvents?: unknown[] }).__aegisWorkerEvents = [];
+    const NativeWorker = window.Worker;
+    window.Worker = class extends NativeWorker {
+      constructor(...args: ConstructorParameters<typeof Worker>) {
+        super(...args);
+        this.addEventListener("message", event => {
+          const events = (window as Window & { __aegisWorkerEvents: unknown[] }).__aegisWorkerEvents;
+          events.push({ type: "message", data: event.data });
+          if (events.length > 30) events.shift();
+        });
+        this.addEventListener("error", event => (window as Window & { __aegisWorkerEvents: unknown[] }).__aegisWorkerEvents.push({ type: "error", message: event.message, filename: event.filename }));
+      }
+    };
+  });
   page.on("pageerror", error => console.error("Speech test page error:", error.message));
   page.on("console", message => { if (message.type() === "error") console.error("Speech test browser error:", message.text()); });
   const workerUrl = productionWorkerUrl();
@@ -62,7 +78,8 @@ test("quiet speech passes through microphone capture and the real speech worker"
       const recordedMs = capture.recordedMs;
       const peakLevel = Math.max(...capture.envelope.map((sample: { v: number }) => sample.v));
       const result = await check.finish();
-      return { result: result.result, recordedMs, peakLevel };
+      const workerEvents = (window as Window & { __aegisWorkerEvents: unknown[] }).__aegisWorkerEvents;
+      return { result: result.result, recordedMs, peakLevel, workerEvents };
     } finally {
       capture.stop();
       navigator.mediaDevices.getUserMedia = original;
@@ -72,6 +89,6 @@ test("quiet speech passes through microphone capture and the real speech worker"
   expect(outcome.recordedMs).toBeGreaterThan(2000);
   expect(outcome.peakLevel).toBeGreaterThan(0);
   expect(outcome.peakLevel).toBeLessThan(0.01);
-  expect(outcome.result.heard, outcome.result.detail).toBe("1234");
+  expect(outcome.result.heard, `${outcome.result.detail}; worker events: ${JSON.stringify(outcome.workerEvents)}`).toBe("1234");
   expect(outcome.result.matched).toBe(4);
 });
