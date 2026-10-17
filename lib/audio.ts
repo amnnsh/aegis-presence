@@ -74,10 +74,11 @@ export class AudioCapture {
     if (this.stopped) { stream.getTracks().forEach(t => t.stop()); return; }
     this.stream = stream;
     stream.getAudioTracks()[0]?.addEventListener("ended", this.onEnded);
-    let context: AudioContext;
-    try { context = new AudioContext({ sampleRate: ASR_SAMPLE_RATE, latencyHint: "interactive" }); } catch { context = new AudioContext(); }
-    this.context = context;
     try {
+      // Capture at the browser's device rate. Forcing 16 kHz here can prevent
+      // Firefox versions from connecting the microphone; end() resamples for ASR.
+      const context = new AudioContext({ latencyHint: "interactive" });
+      this.context = context;
       await context.audioWorklet.addModule(WORKLET_URL);
       if (this.stopped) return;
       const node = new AudioWorkletNode(context, "aegis-capture", { numberOfInputs: 1, numberOfOutputs: 1 });

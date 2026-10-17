@@ -12,8 +12,10 @@ function productionWorkerUrl() {
     if (!source.includes("Loading speech model")) continue;
     const match = source.match(/default\("(static\/chunks\/turbopack-worker-[^"]+)",(\[[^\]]+\])\)/);
     if (!match) continue;
-    const urls = (JSON.parse(match[2]) as string[]).map(path => `/_next/${path}`);
-    return `/_next/${match[1]}#params=${encodeURIComponent(JSON.stringify([urls, "", "", "", ""]))}`;
+    // Match Turbopack's worker constructor: runtime first, plus the chunk base
+    // path used to resolve its dependency promises. An empty base hangs startup.
+    const urls = (JSON.parse(match[2]) as string[]).map(path => `/_next/${path}`).reverse();
+    return `/_next/${match[1]}#params=${encodeURIComponent(JSON.stringify([urls, "", "/_next/", "", ""]))}`;
   }
   throw new Error("Cannot locate the production speech worker; update the test harness for this bundler output.");
 }
@@ -56,7 +58,7 @@ test("quiet speech passes through microphone capture and the real speech worker"
     const base = "/__speech-test__/lib/";
     const { AudioCapture } = await import(base + "audio.ts");
     const { DigitsCheck } = await import(base + "speech.ts");
-    const context = new AudioContext({ sampleRate: 16000 });
+    const context = new AudioContext();
     await Promise.race([context.resume(), new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Test audio context did not resume")), 5000))]);
     const buffer = await context.decodeAudioData(await (await fetch("/__speech-test__/digits.wav")).arrayBuffer());
     const samples = buffer.getChannelData(0);
