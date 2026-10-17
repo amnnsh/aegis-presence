@@ -483,6 +483,14 @@ test("periodic illumination of a still image is not accepted as a pulse", () => 
   assert.equal(result.risk, null, result.detail);
 });
 
+test("two matching halves of a flickering still image remain inconclusive", () => {
+  const first = lowAmplitudeFixture("lit-photo");
+  const offset = first[first.length - 1].t - first[0].t + 40;
+  const samples = [...first, ...first.map(sample => ({ ...sample, t: sample.t + offset }))];
+  const result = analyzePulse(samples);
+  assert.equal(result.risk, null, result.detail);
+});
+
 function backgroundReferenceFixture(hasPulse: boolean): RGBSample[] {
   const samples: RGBSample[] = [];
   let seed = 1;
@@ -651,6 +659,15 @@ test("matching green cheek rhythm survives noisy red and blue channels", () => {
   assert.match(result.detail, /Matching green-channel rhythm in both cheeks/);
 });
 
+test("long sample can recover the same cheek rhythm in two separate halves", () => {
+  const first = noisyColorCheekFixture("face");
+  const offset = first[first.length - 1].t - first[0].t + 40;
+  const samples = [...first, ...first.map(sample => ({ ...sample, t: sample.t + offset }))];
+  const result = analyzePulse(samples);
+  assert.ok(result.bpm !== null && Math.abs(result.bpm - 69) < 4, result.detail);
+  assert.ok(result.risk !== null && result.risk <= 50, result.detail);
+});
+
 test("matching cheek brightness from a periodic lamp on a photo is rejected", () => {
   const result = analyzePulse(noisyColorCheekFixture("lit-photo"));
   assert.equal(result.risk, null, result.detail);
@@ -736,6 +753,11 @@ test("camera capture records separate upper and lower cheek patches", () => {
   assert.equal(rectangles.length >= 5, true);
   assert.ok(rectangles[3].y > rectangles[1].y);
   assert.ok(rectangles[4].y > rectangles[2].y);
+  const quality = vision.getPulsePatchQuality();
+  assert.equal(quality.length, 5);
+  assert.equal(quality[0].label, "Forehead");
+  assert.equal(quality[0].green, 120);
+  assert.equal(quality[0].usablePercent, 100);
 });
 
 test("pulse skin boxes stay fixed across landmark jitter", () => {
