@@ -232,14 +232,22 @@ export class BrowserVision {
       {
         x: (points[280].x + (points[330]?.x ?? points[280].x)) / 2,
         y: (points[280].y + (points[330]?.y ?? points[280].y)) / 2
+      },
+      {
+        x: points[205].x,
+        y: points[205].y
+      },
+      {
+        x: points[425].x,
+        y: points[425].y
       }
     ];
 
-    // The linked detector uses a broad, fixed forehead ROI. A larger
-    // forehead patch yields a cleaner green trace; smaller cheek patches remain
-    // useful for the multi-channel POS estimate.
-    const widths = [32, 16, 16];
-    const heights = [24, 16, 16];
+    // Separate upper and lower cheek measurements give the estimator another
+    // skin area when glasses, glare, or beard obscure one pair. The forehead
+    // remains broad, while cheek boxes are small enough to avoid face edges.
+    const widths = [32, 16, 16, 18, 18];
+    const heights = [24, 16, 16, 18, 18];
 
     if (!this.pulseAnchors || this.pulseAnchors.length !== rawRegions.length) {
       this.pulseAnchors = rawRegions.map((point, index) => {
